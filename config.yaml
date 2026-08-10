@@ -1,0 +1,27 @@
+vm:
+  name: debian-dev
+  goinfre_root: /goinfre
+  disk_directory: debian-vm
+  disk_filename: debian-dev.vdi
+  disk_mb: 32768
+  cpus: 4
+  memory_mb: 4096
+
+debian:
+  iso: /goinfre/mberraho/debian-13.6.0-amd64-netinst.iso
+
+network:
+  ssh_host_port: 2222
+
+ssh:
+  user: dev
+  private_key: state/ssh/debian-vm_ed25519
+  public_key: state/ssh/debian-vm_ed25519.pub
+
+installer:
+  password: dev
+  full_user_name: Developer
+  timeout_seconds: 600
+
+preseed:
+  port: 8080
