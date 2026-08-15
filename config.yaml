@@ -3,7 +3,7 @@ vm:
   goinfre_root: /goinfre
   disk_directory: debian-vm
   disk_filename: debian-dev.vdi
-  disk_mb: 32768
+  disk_mb: 10000
   cpus: 4
   memory_mb: 4096
 
