@@ -1,3 +1,5 @@
 __pycache__
 preseed/.generated
 state/ssh/*
+preseed/preseed.cfg
+preseed/preseed.cfg
