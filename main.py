@@ -20,21 +20,18 @@ ROOT = Path(__file__).resolve().parent
 # Configuration
 # =====================================================================
 
+
 def load_config() -> dict:
     config_path = ROOT / "config.yaml"
 
     if not config_path.is_file():
-        raise FileNotFoundError(
-            f"Configuration file not found: {config_path}"
-        )
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
     with config_path.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     if not isinstance(config, dict):
-        raise ValueError(
-            "config.yaml must contain a YAML mapping"
-        )
+        raise ValueError("config.yaml must contain a YAML mapping")
 
     return config
 
@@ -42,6 +39,7 @@ def load_config() -> dict:
 # =====================================================================
 # Paths
 # =====================================================================
+
 
 def vm_base_path(cfg: dict) -> Path:
     username = getpass.getuser()
@@ -54,37 +52,24 @@ def vm_base_path(cfg: dict) -> Path:
 
 
 def vm_disk_path(cfg: dict) -> Path:
-    return (
-        vm_base_path(cfg)
-        / cfg["vm"]["disk_filename"]
-    ).resolve()
+    return (vm_base_path(cfg) / cfg["vm"]["disk_filename"]).resolve()
 
 
 def ssh_private_key_path(cfg: dict) -> Path:
-    return (
-        ROOT
-        / cfg["ssh"]["private_key"]
-    ).expanduser().resolve()
+    return (ROOT / cfg["ssh"]["private_key"]).expanduser().resolve()
 
 
 def ssh_public_key_path(cfg: dict) -> Path:
-    return (
-        ROOT
-        / cfg["ssh"]["public_key"]
-    ).expanduser().resolve()
+    return (ROOT / cfg["ssh"]["public_key"]).expanduser().resolve()
 
 
 def generate_preseed(cfg: dict) -> Path:
     template_path = ROOT / "preseed" / "preseed.template.cfg"
     preseed_path = ROOT / "preseed" / "preseed.cfg"
 
-    public_key = ssh_public_key_path(cfg).read_text(
-        encoding="utf-8"
-    ).strip()
+    public_key = ssh_public_key_path(cfg).read_text(encoding="utf-8").strip()
 
-    template = template_path.read_text(
-        encoding="utf-8"
-    )
+    template = template_path.read_text(encoding="utf-8")
 
     preseed = template.replace(
         "__SSH_PUBLIC_KEY__",
@@ -97,9 +82,12 @@ def generate_preseed(cfg: dict) -> Path:
     )
 
     return preseed_path
+
+
 # =====================================================================
 # SSH key management
 # =====================================================================
+
 
 def generate_ssh_keypair(cfg: dict) -> None:
     private_key = ssh_private_key_path(cfg)
@@ -111,8 +99,7 @@ def generate_ssh_keypair(cfg: dict) -> None:
             return
 
         raise RuntimeError(
-            "SSH keypair is incomplete. "
-            "Run 'python3 main.py clean' first."
+            "SSH keypair is incomplete. Run 'python3 main.py clean' first."
         )
 
     private_key.parent.mkdir(
@@ -138,9 +125,8 @@ def generate_ssh_keypair(cfg: dict) -> None:
     )
 
     if result.returncode != 0:
-        raise RuntimeError(
-            "ssh-keygen failed"
-        )
+        raise RuntimeError("ssh-keygen failed")
+
 
 def remove_stale_ssh_host_key(
     cfg: dict,
@@ -148,10 +134,7 @@ def remove_stale_ssh_host_key(
     host = "127.0.0.1"
     port = cfg["network"]["ssh_host_port"]
 
-    print(
-        f"[*] Removing stale SSH host key "
-        f"for [{host}]:{port}..."
-    )
+    print(f"[*] Removing stale SSH host key for [{host}]:{port}...")
 
     result = subprocess.run(
         [
@@ -165,12 +148,13 @@ def remove_stale_ssh_host_key(
     )
 
     if result.returncode != 0:
-        raise RuntimeError(
-            "Failed to remove stale SSH host key."
-        )
+        raise RuntimeError("Failed to remove stale SSH host key.")
+
+
 # =====================================================================
 # Create VM
 # =====================================================================
+
 
 def create_vm(cfg: dict) -> None:
     """
@@ -198,7 +182,6 @@ def create_vm(cfg: dict) -> None:
             f"    python3 main.py destroy"
         )
 
-    
     iso_path = resolve_iso_path(
         cfg["vm"]["goinfre_root"],
         cfg["debian"]["iso_filename"],
@@ -215,16 +198,12 @@ def create_vm(cfg: dict) -> None:
 
     iso_path = iso_manager.ensure()
 
-
     if not iso_path.is_file():
-        raise FileNotFoundError(
-            f"Debian ISO not found: {iso_path}"
-        )
+        raise FileNotFoundError(f"Debian ISO not found: {iso_path}")
 
     if disk.exists():
         raise RuntimeError(
-            f"Virtual disk already exists: {disk}\n"
-            f"Run 'python3 main.py clean' first."
+            f"Virtual disk already exists: {disk}\nRun 'python3 main.py clean' first."
         )
 
     print(f"[*] VM name: {name}")
@@ -312,29 +291,17 @@ def create_vm(cfg: dict) -> None:
 
         preseed_server.start()
 
-        preseed_url = (
-            f"http://10.0.2.2:"
-            f"{preseed_server.port}"
-            f"/preseed.cfg"
-        )
+        preseed_url = f"http://10.0.2.2:{preseed_server.port}/preseed.cfg"
 
-        print(
-            "[+] Preseed server listening on "
-            f"0.0.0.0:{preseed_server.port}"
-        )
+        print(f"[+] Preseed server listening on 0.0.0.0:{preseed_server.port}")
 
-        print(
-            f"[+] Preseed URL: {preseed_url}"
-        )
+        print(f"[+] Preseed URL: {preseed_url}")
 
         # ----------------------------------------------------------
         # VirtualBox unattended installation
         # ----------------------------------------------------------
 
-        print(
-            "[*] Configuring unattended "
-            "Debian installation..."
-        )
+        print("[*] Configuring unattended Debian installation...")
 
         vbox.unattended_install(
             iso=iso_path,
@@ -365,14 +332,9 @@ def create_vm(cfg: dict) -> None:
             port=cfg["network"]["ssh_host_port"],
             private_key=private_key,
         )
-        print(
-            "[*] Waiting for Debian installation "
-            "and SSH..."
-        )
+        print("[*] Waiting for Debian installation and SSH...")
 
-        ssh.wait_for_ssh(
-            timeout=cfg["installer"]["timeout_seconds"]
-        )
+        ssh.wait_for_ssh(timeout=cfg["installer"]["timeout_seconds"])
 
         print("[+] Debian installation complete.")
         print("[+] SSH is available.")
@@ -402,10 +364,8 @@ def create_vm(cfg: dict) -> None:
         print()
         print("Useful commands:")
         print("    python3 main.py status")
-        print("    VBoxManage showvminfo "
-              f"{name}")
-        print("    VBoxManage startvm "
-              f"{name} --type gui")
+        print(f"    VBoxManage showvminfo {name}")
+        print(f"    VBoxManage startvm {name} --type gui")
         print("    python3 main.py destroy")
 
         raise
@@ -425,22 +385,19 @@ def create_vm(cfg: dict) -> None:
 # Provision VM
 # =====================================================================
 
+
 def provision_vm(cfg: dict) -> None:
     name = cfg["vm"]["name"]
 
     vbox = VirtualBox(name)
 
     if not vbox.exists():
-        raise RuntimeError(
-            f"VM '{name}' does not exist."
-        )
+        raise RuntimeError(f"VM '{name}' does not exist.")
 
     private_key = ssh_private_key_path(cfg)
 
     if not private_key.is_file():
-        raise FileNotFoundError(
-            f"SSH private key not found: {private_key}"
-        )
+        raise FileNotFoundError(f"SSH private key not found: {private_key}")
 
     ssh = SSHProvisioner(
         user=cfg["ssh"]["user"],
@@ -450,17 +407,13 @@ def provision_vm(cfg: dict) -> None:
     )
     print("[*] Waiting for SSH...")
 
-    ssh.wait_for_ssh(
-        timeout=cfg["installer"]["timeout_seconds"]
-    )
+    ssh.wait_for_ssh(timeout=cfg["installer"]["timeout_seconds"])
 
     print("[+] SSH connection available.")
 
     print("[*] Running provisioning script...")
 
-    ssh.run_script(
-        ROOT / "scripts" / "provision.sh"
-    )
+    ssh.run_script(ROOT / "scripts" / "provision.sh")
 
     print("[+] Provisioning complete.")
 
@@ -468,6 +421,7 @@ def provision_vm(cfg: dict) -> None:
 # =====================================================================
 # Destroy VM
 # =====================================================================
+
 
 def destroy_vm(cfg: dict) -> None:
     name = cfg["vm"]["name"]
@@ -478,9 +432,7 @@ def destroy_vm(cfg: dict) -> None:
         print("[*] VM does not exist.")
         return
 
-    print(
-        f"[*] Destroying VM '{name}'..."
-    )
+    print(f"[*] Destroying VM '{name}'...")
 
     vbox.delete()
 
@@ -490,6 +442,7 @@ def destroy_vm(cfg: dict) -> None:
 # =====================================================================
 # Clean project resources
 # =====================================================================
+
 
 def cleanup(cfg: dict) -> None:
     """
@@ -506,15 +459,10 @@ def cleanup(cfg: dict) -> None:
     # VM
     # --------------------------------------------------------------
 
-    vbox = VirtualBox(
-        cfg["vm"]["name"]
-    )
+    vbox = VirtualBox(cfg["vm"]["name"])
 
     if vbox.exists():
-        print(
-            f"[*] Removing VM "
-            f"'{cfg['vm']['name']}'..."
-        )
+        print(f"[*] Removing VM '{cfg['vm']['name']}'...")
 
         vbox.delete()
 
@@ -528,17 +476,11 @@ def cleanup(cfg: dict) -> None:
     vm_directory = vm_base_path(cfg)
 
     if vm_directory.exists():
-        print(
-            f"[*] Removing VM directory: "
-            f"{vm_directory}"
-        )
+        print(f"[*] Removing VM directory: {vm_directory}")
 
         shutil.rmtree(vm_directory)
 
-        print(
-            f"[+] Removed VM directory: "
-            f"{vm_directory}"
-        )
+        print(f"[+] Removed VM directory: {vm_directory}")
 
     # --------------------------------------------------------------
     # SSH keys
@@ -552,9 +494,7 @@ def cleanup(cfg: dict) -> None:
         public_key,
     ):
         if key.exists():
-            print(
-                f"[*] Removing SSH key: {key}"
-            )
+            print(f"[*] Removing SSH key: {key}")
 
             key.unlink()
 
@@ -585,6 +525,7 @@ def cleanup(cfg: dict) -> None:
 # Rebuild
 # =====================================================================
 
+
 def rebuild_vm(cfg: dict) -> None:
     print("[*] Rebuilding VM...")
 
@@ -604,6 +545,7 @@ def rebuild_vm(cfg: dict) -> None:
 # Status
 # =====================================================================
 
+
 def status_vm(cfg: dict) -> None:
     name = cfg["vm"]["name"]
 
@@ -616,33 +558,22 @@ def status_vm(cfg: dict) -> None:
     else:
         print(f"State: {vbox.state()}")
 
-    print(
-        f"VM directory: {vm_base_path(cfg)}"
-    )
+    print(f"VM directory: {vm_base_path(cfg)}")
 
-    print(
-        f"Disk: {vm_disk_path(cfg)}"
-    )
+    print(f"Disk: {vm_disk_path(cfg)}")
 
-    print(
-        f"SSH private key: "
-        f"{ssh_private_key_path(cfg)}"
-    )
+    print(f"SSH private key: {ssh_private_key_path(cfg)}")
 
-    print(
-        f"SSH public key: "
-        f"{ssh_public_key_path(cfg)}"
-    )
+    print(f"SSH public key: {ssh_public_key_path(cfg)}")
 
 
 # =====================================================================
 # CLI
 # =====================================================================
 
+
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Automated Debian VM manager"
-    )
+    parser = argparse.ArgumentParser(description="Automated Debian VM manager")
 
     parser.add_argument(
         "command",
@@ -698,4 +629,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

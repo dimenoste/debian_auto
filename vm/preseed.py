@@ -103,10 +103,7 @@ class PreseedServer:
 
         self._thread.start()
 
-        print(
-            f"[+] Preseed server listening on "
-            f"{self.host}:{self.port}"
-        )
+        print(f"[+] Preseed server listening on {self.host}:{self.port}")
 
     def stop(self) -> None:
         if self._server is None:

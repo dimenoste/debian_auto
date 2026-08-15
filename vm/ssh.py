@@ -52,9 +52,7 @@ class SSHProvisioner:
 
             time.sleep(5)
 
-        raise TimeoutError(
-            f"SSH did not become available within {timeout} seconds."
-        )
+        raise TimeoutError(f"SSH did not become available within {timeout} seconds.")
 
     def run(
         self,
@@ -78,9 +76,7 @@ class SSHProvisioner:
         script = script.resolve()
 
         if not script.is_file():
-            raise FileNotFoundError(
-                f"Provisioning script not found: {script}"
-            )
+            raise FileNotFoundError(f"Provisioning script not found: {script}")
 
         print(f"[*] Provisioning with {script}")
 

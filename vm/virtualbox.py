@@ -44,8 +44,7 @@ class VirtualBox:
 
         if result.returncode != 0:
             raise VirtualBoxError(
-                f"VBoxManage failed with exit code "
-                f"{result.returncode}"
+                f"VBoxManage failed with exit code {result.returncode}"
             )
 
         return result
@@ -86,9 +85,7 @@ class VirtualBox:
                     1,
                 )[1].strip('"')
 
-        raise VirtualBoxError(
-            f"Unable to determine state of VM '{self.name}'"
-        )
+        raise VirtualBoxError(f"Unable to determine state of VM '{self.name}'")
 
     # ------------------------------------------------------------------
     # VM creation
@@ -101,9 +98,7 @@ class VirtualBox:
         """Create and register the VM."""
 
         if self.exists():
-            raise VirtualBoxError(
-                f"VM '{self.name}' already exists"
-            )
+            raise VirtualBoxError(f"VM '{self.name}' already exists")
 
         command = [
             "createvm",
@@ -144,19 +139,13 @@ class VirtualBox:
         """Configure CPU, memory, networking and boot order."""
 
         if cpus < 1:
-            raise ValueError(
-                "CPU count must be at least 1"
-            )
+            raise ValueError("CPU count must be at least 1")
 
         if memory_mb < 512:
-            raise ValueError(
-                "Memory must be at least 512 MB"
-            )
+            raise ValueError("Memory must be at least 512 MB")
 
         if not 1 <= ssh_port <= 65535:
-            raise ValueError(
-                f"Invalid SSH host port: {ssh_port}"
-            )
+            raise ValueError(f"Invalid SSH host port: {ssh_port}")
 
         self.run(
             "modifyvm",
@@ -236,16 +225,12 @@ class VirtualBox:
         """Create a VDI disk."""
 
         if size_mb < 4096:
-            raise ValueError(
-                "Virtual disk must be at least 4096 MB"
-            )
+            raise ValueError("Virtual disk must be at least 4096 MB")
 
         path = path.resolve()
 
         if path.exists():
-            raise VirtualBoxError(
-                f"Disk already exists: {path}"
-            )
+            raise VirtualBoxError(f"Disk already exists: {path}")
 
         path.parent.mkdir(
             parents=True,
@@ -272,9 +257,7 @@ class VirtualBox:
         path = path.resolve()
 
         if not path.is_file():
-            raise FileNotFoundError(
-                f"Virtual disk not found: {path}"
-            )
+            raise FileNotFoundError(f"Virtual disk not found: {path}")
 
         self.run(
             "storageattach",
@@ -300,9 +283,7 @@ class VirtualBox:
         iso = iso.resolve()
 
         if not iso.is_file():
-            raise FileNotFoundError(
-                f"Debian ISO not found: {iso}"
-            )
+            raise FileNotFoundError(f"Debian ISO not found: {iso}")
 
         self.run(
             "storageattach",
@@ -342,40 +323,24 @@ class VirtualBox:
         iso = iso.resolve()
 
         if not iso.is_file():
-            raise FileNotFoundError(
-                f"Debian ISO not found: {iso}"
-            )
+            raise FileNotFoundError(f"Debian ISO not found: {iso}")
 
         if not user:
-            raise ValueError(
-                "Guest username cannot be empty"
-            )
+            raise ValueError("Guest username cannot be empty")
 
         if not password:
-            raise ValueError(
-                "Guest password cannot be empty"
-            )
+            raise ValueError("Guest password cannot be empty")
 
         if not full_user_name:
-            raise ValueError(
-                "Full user name cannot be empty"
-            )
+            raise ValueError("Full user name cannot be empty")
 
         if not hostname:
-            raise ValueError(
-                "Hostname cannot be empty"
-            )
+            raise ValueError("Hostname cannot be empty")
 
         if not preseed_url:
-            raise ValueError(
-                "Preseed URL cannot be empty"
-            )
+            raise ValueError("Preseed URL cannot be empty")
 
-        kernel_parameters = (
-            "auto=true "
-            "priority=critical "
-            f"preseed/url={preseed_url}"
-        )
+        kernel_parameters = f"auto=true priority=critical preseed/url={preseed_url}"
         self.run(
             "unattended",
             "install",
@@ -409,11 +374,7 @@ class VirtualBox:
     ) -> None:
         """Start the VM."""
 
-        frontend = (
-            "headless"
-            if headless
-            else "gui"
-        )
+        frontend = "headless" if headless else "gui"
 
         self.run(
             "startvm",
@@ -446,8 +407,7 @@ class VirtualBox:
             time.sleep(1)
 
         raise VirtualBoxError(
-            f"VM '{self.name}' did not power off "
-            f"within {timeout} seconds"
+            f"VM '{self.name}' did not power off within {timeout} seconds"
         )
 
     def stop(self) -> None:
@@ -466,14 +426,10 @@ class VirtualBox:
             "paused",
         }:
             raise VirtualBoxError(
-                f"Cannot stop VM '{self.name}' "
-                f"while it is in state "
-                f"'{current_state}'"
+                f"Cannot stop VM '{self.name}' while it is in state '{current_state}'"
             )
 
-        print(
-            f"[*] Powering off VM '{self.name}'..."
-        )
+        print(f"[*] Powering off VM '{self.name}'...")
 
         self.run(
             "controlvm",
@@ -494,9 +450,7 @@ class VirtualBox:
         if current_state != "poweroff":
             self.stop()
 
-        print(
-            f"[*] Unregistering VM '{self.name}'..."
-        )
+        print(f"[*] Unregistering VM '{self.name}'...")
 
         self.run(
             "unregistervm",
