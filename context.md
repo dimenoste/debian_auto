@@ -1,187 +1,569 @@
-Use the following as the handoff context for another LLM. It contains the project architecture, intended design, current files, decisions already made, and the exact failures encountered.
-
 # Debian VM Automation Project — Full Handoff Context
 
-## 1. Project goal
+This document is the authoritative blueprint for the current state of the project. It is intended to allow another LLM or developer to understand the architecture, reproduce the project, diagnose failures, and extend it without reintroducing previously fixed problems.
 
-This project automates creation of a minimal Debian development VM using VirtualBox.
+---
 
-Host:
+## 1. Project purpose
 
-* Linux
-* VirtualBox
-* Python 3
-* Project located at:
-  `/home/mberraho/projects/VM/debian-automation`
+The project automates the creation of a small Debian development VM using VirtualBox.
 
-VM:
+The primary motivation is the environment at **42**:
 
-* Debian 13.6.0 amd64
-* VM name: `debian-dev`
-* Intended use: coding/development
-* Headless operation
-* SSH access from host
-* NAT port forwarding:
-  `127.0.0.1:2222 -> guest:22`
+* School machines have relatively limited local storage.
+* `/goinfre` provides substantially more storage.
+* `/goinfre` is tied to the physical machine being used.
+* Moving to another 42 machine therefore means either:
 
-The VM should be minimal. The previous VirtualBox unattended installation installed unnecessary desktop packages such as Firefox and LibreOffice. The goal is to avoid those packages.
+  * reconnecting to the machine containing the VM, or
+  * recreating the VM on the new machine.
+* A disposable VM that can be recreated automatically is therefore much more practical than maintaining a manually configured VM.
 
-The project initially attempted to rely entirely on `VBoxManage unattended install`, but that did not reliably provide the required `openssh-server` package. The current direction is therefore:
+The project reduces the recreation process to essentially:
 
-**VirtualBox unattended installation + Debian preseed configuration served over HTTP.**
+```text
+uv run python main.py rebuild
+```
 
-The project no longer intends to manually install packages after login just to make SSH work.
+The VM is then:
+
+1. Created on `/goinfre`.
+2. Given the configured CPU/RAM/storage resources.
+3. Installed from a Debian netinst ISO.
+4. Configured as a minimal CLI system.
+5. Given `sudo`.
+6. Given `openssh-server`.
+7. Configured for SSH key authentication.
+8. Accessible from the host through localhost port forwarding.
+9. Provisioned through `scripts/provision.sh`.
+10. Suitable for development through VS Code Remote SSH.
+
+The VM is deliberately disposable. The host project contains the automation needed to recreate it rather than treating the VM itself as precious state.
 
 ---
 
 # 2. Current project architecture
 
-Current tree:
+Current conceptual structure:
 
 ```text
-.
+debian-automation/
 ├── config.yaml
 ├── main.py
-├── preseed
-│   └── preseed.cfg
 ├── requirements.txt
-├── scripts
+├── preseed/
+│   ├── preseed.cfg
+│   └── potentially preseed.cfg.template
+├── scripts/
 │   └── provision.sh
-├── state
-│   └── ssh
-└── vm
+├── state/
+│   └── ssh/
+│       ├── debian-vm_ed25519
+│       └── debian-vm_ed25519.pub
+└── vm/
     ├── __init__.py
+    ├── iso.py
+    ├── preseed.py
     ├── ssh.py
     └── virtualbox.py
 ```
 
-`state/ssh` contains project-generated SSH keys.
+`__pycache__` directories are irrelevant generated files.
 
-The old `__pycache__` directories are irrelevant.
+The project intentionally avoids introducing additional third-party dependencies.
 
----
+The Python standard library is used for:
 
-# 3. Important architectural decision
+* ISO downloads
+* SHA-512 verification
+* HTTP preseed serving
+* threading
+* socket handling
+* subprocess execution
+* filesystem operations
 
-No custom ISO is being built.
-
-No Debian netboot infrastructure is being installed.
-
-The intended mechanism is:
-
-```text
-Python
-  |
-  +-- start temporary HTTP server
-  |       |
-  |       +-- /preseed.cfg
-  |
-  +-- VBoxManage unattended install
-  |       |
-  |       +-- extra Debian kernel parameters
-  |               |
-  |               +-- auto=true
-  |               +-- priority=critical
-  |               +-- preseed/url=http://<host>:8080/preseed.cfg
-  |
-  +-- start VM
-  |
-  +-- Debian installer fetches preseed.cfg
-  |
-  +-- Debian installer installs only required packages
-  |       |
-  |       +-- openssh-server
-  |       +-- sudo
-  |       +-- development utilities as explicitly configured
-  |
-  +-- VM boots
-  |
-  +-- SSH becomes available
-  |
-  +-- SSHProvisioner runs scripts/provision.sh
-```
-
-The HTTP server exists only during installation.
+Existing project dependencies such as `PyYAML` remain unchanged.
 
 ---
 
-# 4. Why preseed was introduced
+# 3. Current execution model
 
-VirtualBox's:
-
-```text
-VBoxManage unattended install
-```
-
-supports:
+The main lifecycle is:
 
 ```text
---package-selection-adjustment=<keyword>
+main.py
+   |
+   +-- load config.yaml
+   |
+   +-- ISOManager
+   |      |
+   |      +-- check ISO
+   |      +-- download if missing
+   |      +-- verify SHA-512
+   |
+   +-- generate SSH keypair
+   |
+   +-- generate/render preseed
+   |
+   +-- VirtualBox
+   |      |
+   |      +-- create VM
+   |      +-- configure CPU/RAM/network
+   |      +-- create disk
+   |      +-- attach ISO
+   |
+   +-- PreseedServer
+   |      |
+   |      +-- dynamically allocate host port
+   |      +-- serve preseed.cfg
+   |
+   +-- VBoxManage unattended installation
+   |
+   +-- start VM
+   |
+   +-- wait for SSH
+   |
+   +-- stop preseed server
+   |
+   +-- provision.sh through SSH
 ```
 
-but this is not a reliable mechanism for explicitly declaring Debian package selection.
-
-The command help showed:
+The important separation is:
 
 ```text
---package-selection-adjustment=<keyword>
-    Adjustments to the guest OS packages/components selection.
+ISO management
+VirtualBox management
+Debian installation configuration
+SSH management
+Post-install provisioning
 ```
 
-The attempted command used:
-
-```text
---package-selection-adjustment minimal openssh-server
-```
-
-which is incorrect because `openssh-server` is not an additional argument to that option.
-
-The later version correctly used:
-
-```text
---package-selection-adjustment
-minimal
-```
-
-but SSH still was not reliably installed.
-
-Therefore package selection belongs in Debian's preseed configuration.
+Each layer should remain independent.
 
 ---
 
-# 5. Debian ISO
+# 4. Important current change: ISO management
 
-Current ISO:
+The project now handles the case where the user does **not** already have the Debian ISO.
+
+Previously `main.py` did:
+
+```python
+if not iso_path.is_file():
+    raise FileNotFoundError(...)
+```
+
+This made the project unusable on a new 42 machine unless the ISO had already been manually copied into `/goinfre`.
+
+The current design instead uses `vm/iso.py`.
+
+The important behavior is:
+
+```text
+ISO exists
+    |
+    +-- verify SHA-512
+    |
+    +-- valid -> continue
+    |
+    +-- invalid -> delete and redownload
+
+ISO does not exist
+    |
+    +-- download Debian ISO
+    +-- download SHA512SUMS
+    +-- verify downloaded ISO
+    +-- move verified ISO into final location
+```
+
+The ISO therefore becomes an automatically managed dependency.
+
+---
+
+# 5. Current ISOManager
+
+The current implementation is conceptually:
+
+```python
+from __future__ import annotations
+
+import getpass
+import hashlib
+import urllib.request
+from pathlib import Path
+
+
+def resolve_iso_path(goinfre_root: str, iso_filename: str) -> Path:
+    return Path(goinfre_root) / getpass.getuser() / iso_filename
+
+
+class ISOError(RuntimeError):
+    pass
+
+
+class ISOManager:
+    def __init__(
+        self,
+        iso_path: Path,
+        iso_url: str,
+        checksum_url: str,
+    ):
+        self.iso_path = iso_path
+        self.iso_url = iso_url
+        self.checksum_url = checksum_url
+
+    def _download(self, url: str, destination: Path) -> None:
+        ...
+    
+    def _download_checksum_manifest(self) -> str:
+        ...
+    
+    def _expected_sha512(self) -> str:
+        ...
+    
+    def _sha512(self, path: Path) -> str:
+        ...
+    
+    def verify(self) -> bool:
+        ...
+    
+    def ensure(self) -> Path:
+        ...
+```
+
+The implementation uses only Python's standard library.
+
+The download is streamed in chunks rather than loading the ISO into memory.
+
+The checksum is calculated incrementally using:
+
+```python
+hashlib.sha512()
+```
+
+---
+
+# 6. Current ISO location
+
+The current ISO is:
 
 ```text
 /goinfre/mberraho/debian-13.6.0-amd64-netinst.iso
 ```
 
+The path is generated using:
+
+```python
+resolve_iso_path(
+    cfg["vm"]["goinfre_root"],
+    cfg["debian"]["iso_filename"],
+)
+```
+
+The intended general form is:
+
+```text
+<goinfre_root>/<username>/<iso_filename>
+```
+
+For example:
+
+```text
+/goinfre/mberraho/debian-13.6.0-amd64-netinst.iso
+```
+
+This means the ISO is also kept on `/goinfre`, rather than consuming valuable space in the project directory.
+
 ---
 
-# 6. VM filesystem
+# 7. Current ISO verification
 
-Configured VM base directory:
+The project verifies the ISO against Debian's official SHA-512 manifest.
+
+Current manifest:
+
+```text
+https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/SHA512SUMS
+```
+
+The verification flow is:
+
+```text
+download/read SHA512SUMS
+        |
+        v
+find exact ISO filename
+        |
+        v
+calculate local SHA-512
+        |
+        v
+compare
+```
+
+A successful run produces:
+
+```text
+[*] Debian ISO found: /goinfre/mberraho/debian-13.6.0-amd64-netinst.iso
+[*] Checking SHA-512: /goinfre/mberraho/debian-13.6.0-amd64-netinst.iso
+[*] Downloading checksum manifest: https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/SHA512SUMS
+[+] ISO SHA-512: OK
+```
+
+The ISO must never be attached to the VM before verification succeeds.
+
+---
+
+# 8. ISO download behavior
+
+If the ISO does not exist:
+
+```text
+[*] Debian ISO not found: ...
+[*] Downloading: <Debian ISO URL>
+[*] Destination: <path>.part
+```
+
+The download first goes to:
+
+```text
+<iso>.iso.part
+```
+
+Only after checksum verification does it become:
+
+```text
+<iso>.iso
+```
+
+This prevents a partially downloaded ISO from being mistaken for a valid ISO.
+
+If the checksum fails, the `.part` file is removed.
+
+This is important because a machine can lose network connectivity or `/goinfre` space during a large ISO download.
+
+---
+
+# 9. Current Debian ISO
+
+The project uses the Debian 13.6.0 amd64 netinst ISO:
+
+```text
+debian-13.6.0-amd64-netinst.iso
+```
+
+The exact URL is configuration-driven rather than hardcoded throughout the application.
+
+The project should continue using Debian's official distribution infrastructure.
+
+---
+
+# 10. VM storage location
+
+The VM lives on `/goinfre`.
+
+Current base:
 
 ```text
 /goinfre/mberraho/debian-vm
 ```
 
-VM disk:
+Current disk:
 
 ```text
 /goinfre/mberraho/debian-vm/debian-dev.vdi
 ```
 
-The actual VirtualBox VM directory is currently:
+The actual VirtualBox machine directory is:
 
 ```text
 /goinfre/mberraho/debian-vm/debian-dev/
 ```
 
+This is deliberate.
+
+The project directory remains small and portable, while:
+
+* ISO
+* VM configuration
+* VDI
+
+are stored on `/goinfre`.
+
 ---
 
-# 7. SSH configuration
+# 11. Default VM resources
+
+The VM resources are configurable through `config.yaml`.
+
+The default disk is approximately:
+
+```text
+9.8 GB
+```
+
+Inside the VM, the expected partitioning is approximately:
+
+```text
+NAME   MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
+sda      8:0    0   9.8G  0 disk
+sda1     8:1    0   9.2G  0 part /
+sda2     8:2    0     1K  0 part
+sda5     8:5    0   572M  0 part [SWAP]
+sr0     11:0    1  1024M  1 rom
+```
+
+The RAM/CPU configuration is controlled through:
+
+```yaml
+vm:
+    cpus: ...
+    memory_mb: ...
+    disk_mb: ...
+```
+
+The user is expected to modify those values according to the host machine.
+
+The important architectural rule is:
+
+```text
+Do not hard-code VM resources in Python.
+```
+
+Changing:
+
+```yaml
+cpus:
+memory_mb:
+disk_mb:
+```
+
+should be sufficient to change the VM specifications.
+
+---
+
+# 12. Why configurable VM resources matter at 42
+
+Different 42 machines have different local resource constraints.
+
+The project is specifically designed around the idea that:
+
+```text
+local machine resources
+        +
+large /goinfre storage
+        =
+cheap disposable development VM
+```
+
+The VM should therefore not assume a powerful host.
+
+A user can reduce:
+
+```text
+CPU
+RAM
+disk
+```
+
+when working on a constrained machine.
+
+Conversely, a machine with more resources can increase them.
+
+---
+
+# 13. VM networking
+
+The VM uses VirtualBox NAT networking.
+
+Conceptually:
+
+```text
+Host
+127.0.0.1:2222
+       |
+       | VirtualBox NAT port forwarding
+       v
+Guest
+10.0.2.x:22
+       |
+       v
+sshd
+```
+
+The host connects to:
+
+```text
+127.0.0.1:2222
+```
+
+The guest's SSH server listens on:
+
+```text
+22
+```
+
+VirtualBox forwards:
+
+```text
+127.0.0.1:2222 -> guest:22
+```
+
+The VM does not expose SSH directly on the LAN.
+
+---
+
+# 14. Security implications of the network design
+
+The VM should not be described simply as being on a "private network."
+
+The more precise description is:
+
+```text
+VirtualBox NAT + host-loopback SSH forwarding
+```
+
+The SSH endpoint is:
+
+```text
+127.0.0.1:2222
+```
+
+This means the service is intended to be reachable from the host itself, not directly from other machines on the network.
+
+That is significantly safer than forwarding:
+
+```text
+0.0.0.0:2222 -> guest:22
+```
+
+because the latter would potentially expose SSH to the local network.
+
+The intended configuration is therefore:
+
+```text
+127.0.0.1:2222
+```
+
+not:
+
+```text
+0.0.0.0:2222
+```
+
+The VM itself still has its own network connectivity through NAT for things such as:
+
+```text
+apt
+curl
+git
+```
+
+but inbound SSH is restricted to the host's loopback interface.
+
+---
+
+# 15. SSH configuration
 
 Guest user:
 
@@ -195,22 +577,16 @@ Host:
 127.0.0.1
 ```
 
-Host SSH port:
+Host port:
 
 ```text
 2222
 ```
 
-Guest SSH port:
+Guest port:
 
 ```text
 22
-```
-
-VirtualBox forwarding:
-
-```text
-127.0.0.1:2222 -> VM:22
 ```
 
 Manual connection:
@@ -219,62 +595,176 @@ Manual connection:
 ssh -p 2222 dev@127.0.0.1
 ```
 
-The project also generates an SSH key under:
+The project-generated private key is:
 
 ```text
-/home/mberraho/projects/VM/debian-automation/state/ssh/debian-vm_ed25519
-/home/mberraho/projects/VM/debian-automation/state/ssh/debian-vm_ed25519.pub
+state/ssh/debian-vm_ed25519
 ```
 
-The key generation logic itself still needs to be verified/implemented correctly if it is not already handled elsewhere.
+Public key:
+
+```text
+state/ssh/debian-vm_ed25519.pub
+```
+
+The normal automated connection is therefore:
+
+```bash
+ssh \
+    -i state/ssh/debian-vm_ed25519 \
+    -p 2222 \
+    dev@127.0.0.1
+```
 
 ---
 
-# 8. SSH host-key problem
+# 16. Is SSH passwordless?
 
-When rebuilding the VM, Debian generates a new SSH host key.
+The intended final configuration is **key-based SSH authentication**.
 
-Previously the host produced:
+The project generates an ED25519 keypair:
 
 ```text
-@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
-@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-...
-Offending ECDSA key in /home/mberraho/.ssh/known_hosts:9
-Host for [127.0.0.1]:2222 has changed
+debian-vm_ed25519
+debian-vm_ed25519.pub
 ```
 
-The intended solution is NOT to repeatedly run:
+The public key is installed into the VM for:
+
+```text
+dev
+```
+
+The private key remains on the host.
+
+Therefore normal SSH usage does not require typing the Debian user's password.
+
+This should not be confused with:
+
+```text
+no authentication
+```
+
+Authentication still occurs through the private SSH key.
+
+The Debian installer password exists primarily to bootstrap the account/install process.
+
+The desired end state is:
+
+```text
+host private key
+       |
+       v
+SSH authentication
+       |
+       v
+dev@debian-vm
+```
+
+not:
+
+```text
+username + password on every SSH connection
+```
+
+---
+
+# 17. SSH host-key handling
+
+Every recreated VM can generate a new SSH host key.
+
+Because the VM is disposable, the same endpoint:
+
+```text
+[127.0.0.1]:2222
+```
+
+may legitimately represent a completely new VM after:
 
 ```bash
-ssh-keygen -R '[127.0.0.1]:2222'
+python3 main.py rebuild
 ```
 
-Instead, all automated SSH commands should use:
+Therefore normal SSH known-host verification would produce:
+
+```text
+WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!
+```
+
+The automation handles this explicitly.
+
+The SSH client commands should use:
 
 ```text
 -o StrictHostKeyChecking=no
 -o UserKnownHostsFile=/dev/null
 ```
 
-because this VM is disposable and the SSH endpoint is a local NAT-forwarded development VM.
+These options affect only the **host-side SSH client**.
 
-These options belong in:
+They do not weaken the guest's SSH authentication mechanism.
+
+They simply tell the disposable VM automation:
 
 ```text
-vm/ssh.py
+do not persistently trust the previous VM's host key
 ```
 
-inside the single common SSH command builder.
-
-Do not duplicate the options throughout `main.py`.
+This is appropriate for a disposable local development VM.
 
 ---
 
-# 9. Current SSHProvisioner design
+# 18. Important distinction about SSH security
 
-The common command builder should conceptually be:
+These options:
+
+```text
+StrictHostKeyChecking=no
+UserKnownHostsFile=/dev/null
+```
+
+do not mean:
+
+```text
+SSH is unauthenticated.
+```
+
+They mean:
+
+```text
+the host does not persistently verify the server identity using ~/.ssh/known_hosts
+```
+
+Authentication of the user should still use:
+
+```text
+ED25519 private key
+```
+
+The security model is therefore:
+
+```text
+Network exposure:
+    localhost only
+
+User authentication:
+    SSH key
+
+Server identity:
+    deliberately not persisted because VM is disposable
+```
+
+This is suitable for the project's local disposable-VM use case, but it would not be the correct configuration for a production server.
+
+---
+
+# 19. SSHProvisioner responsibilities
+
+`vm/ssh.py` owns SSH behavior.
+
+It should contain one common command builder.
+
+Conceptually:
 
 ```python
 def command(self, *remote_command: str) -> list[str]:
@@ -302,108 +792,290 @@ def command(self, *remote_command: str) -> list[str]:
     ]
 ```
 
-Then:
+Every SSH operation should use this builder.
 
-```python
+Do not duplicate SSH options in:
+
+```text
+main.py
+provision_vm()
 wait_for_ssh()
-run()
 run_script()
 ```
 
-must all use `self.command(...)`.
+---
 
-This prevents inconsistent SSH behavior.
+# 20. SSH readiness
+
+Starting the VM does not mean SSH is immediately available.
+
+The actual sequence is:
+
+```text
+VirtualBox starts VM
+        |
+        v
+Debian boots
+        |
+        v
+installer finishes
+        |
+        v
+system reboots
+        |
+        v
+systemd starts ssh.service
+        |
+        v
+port 22 accepts connections
+        |
+        v
+SSHProvisioner succeeds
+```
+
+Therefore:
+
+```python
+vbox.start(headless=True)
+```
+
+must be followed by:
+
+```python
+ssh.wait_for_ssh(...)
+```
+
+The project must not assume that the VM is ready immediately after `start()`.
 
 ---
 
-# 10. Important distinction: SSH client vs SSH server
+# 21. Previous SSH failure
 
-The following options:
-
-```text
-StrictHostKeyChecking=no
-UserKnownHostsFile=/dev/null
-```
-
-only affect the host-side SSH client.
-
-They do NOT install or start `openssh-server` inside Debian.
-
-The previous error:
+A previous manual connection produced:
 
 ```text
 kex_exchange_identification: read: Connection reset by peer
-Connection reset by peer port 2222
+Connection reset by 127.0.0.1 port 2222
 ```
 
-indicates that the forwarding path reached the guest but the guest-side SSH service was not accepting the connection.
+This was not a host-key problem.
 
-Therefore the real fix is to make the Debian installer install and enable:
+It indicated that the forwarding path existed but the guest SSH service was not yet usable.
+
+Likely causes included:
+
+```text
+Debian installer still running
+openssh-server not installed
+sshd not running
+preseed not applied
+VM not yet booted into installed system
+```
+
+The correct fix is therefore to make Debian's installation reliably install and start:
 
 ```text
 openssh-server
 ```
 
-through preseed.
+and then wait for SSH.
 
 ---
 
-# 11. Temporary HTTP server
+# 22. Debian installation strategy
 
-A `PreseedServer` class was introduced.
-
-Its intended responsibility:
+The project uses:
 
 ```text
-serve:
-    ROOT/preseed/preseed.cfg
-
-on:
-    0.0.0.0:<some-port>
-
-while:
-    Debian installer is running
+Debian netinst ISO
++
+VirtualBox unattended installation
++
+Debian preseed
 ```
 
-Then:
+It does **not** build a custom ISO.
+
+It does **not** require a separate PXE/netboot infrastructure.
+
+The high-level process is:
 
 ```text
-preseed URL:
-http://<host-address>:<port>/preseed.cfg
+Debian ISO
+    |
+    v
+VirtualBox unattended installation
+    |
+    +-- Debian kernel parameters
+            |
+            +-- auto=true
+            +-- priority=critical
+            +-- preseed/url=<temporary HTTP URL>
+    |
+    v
+Debian installer
+    |
+    v
+preseed.cfg
 ```
 
-is supplied to the Debian installer through Linux kernel parameters.
+---
 
-The first implementation attempted:
+# 23. Why preseed is necessary
+
+VirtualBox's:
 
 ```text
-port=8080
+VBoxManage unattended install
 ```
 
-and failed with:
+is useful for configuring an unattended installation, but it does not provide sufficiently precise Debian package-selection control for this project.
+
+An earlier attempt used:
 
 ```text
-[ERROR] Could not start preseed HTTP server on port 8080:
-[Errno 98] Address already in use
+--package-selection-adjustment minimal openssh-server
 ```
 
-Therefore the implementation must NOT blindly assume port 8080 is free.
+This was incorrect.
 
-Preferred design:
+The option:
 
 ```text
-bind host:
-    0.0.0.0
-
-port:
-    dynamically select a free ephemeral port
+--package-selection-adjustment
 ```
 
-or configure a port from `config.yaml` and detect collisions.
+expects a value such as:
 
-Dynamic port selection is preferable.
+```text
+minimal
+```
 
-A temporary server should use Python's standard library:
+not a list of Debian packages.
+
+Even with:
+
+```text
+--package-selection-adjustment minimal
+```
+
+the installation did not reliably guarantee the required:
+
+```text
+openssh-server
+```
+
+package.
+
+Therefore Debian's own installer configuration is used for package selection.
+
+---
+
+# 24. Desired Debian installation
+
+The VM should be:
+
+```text
+CLI only
+minimal
+development oriented
+SSH enabled
+sudo enabled
+```
+
+It should not install a desktop environment.
+
+Specifically, it should avoid unnecessary packages/tasks such as:
+
+```text
+GNOME
+KDE
+XFCE
+Firefox
+LibreOffice
+other desktop applications
+```
+
+The previous installation approach resulted in unnecessary desktop software, which is undesirable on a small VM.
+
+---
+
+# 25. Preseed package requirements
+
+At minimum, the installation needs:
+
+```text
+openssh-server
+sudo
+```
+
+Other basic utilities can be included where justified.
+
+Typical development packages can instead be installed later by:
+
+```text
+scripts/provision.sh
+```
+
+This creates a clean separation:
+
+```text
+preseed
+    =
+minimum system required to boot and access the VM
+
+provision.sh
+    =
+development environment
+```
+
+---
+
+# 26. `scripts/provision.sh`
+
+The provisioning script is the correct place for additional development dependencies.
+
+For example:
+
+```text
+git
+curl
+wget
+build-essential
+gcc
+g++
+make
+python3
+python3-pip
+python3-venv
+clang
+gdb
+strace
+ripgrep
+tmux
+vim/neovim
+pkg-config
+```
+
+The exact list should remain project-specific.
+
+The user can add additional dependencies to:
+
+```text
+scripts/provision.sh
+```
+
+without modifying the VM creation mechanism.
+
+This is particularly useful for 42 projects because the base VM can remain small while the development environment can evolve.
+
+---
+
+# 27. Temporary preseed HTTP server
+
+The project uses a small Python HTTP server.
+
+It should use only the standard library:
 
 ```python
 http.server
@@ -412,929 +1084,73 @@ threading
 socket
 ```
 
-No external HTTP dependency is needed.
+No Flask.
+
+No FastAPI.
+
+No external HTTP server.
+
+The server's sole responsibility is:
+
+```text
+serve preseed.cfg
+```
+
+during Debian installation.
+
+Once the installed VM is reachable through SSH, the HTTP server can be shut down.
 
 ---
 
-# 12. Critical networking issue with preseed HTTP server
+# 28. Dynamic HTTP port
 
-The Debian installer runs inside the VM.
-
-The VM uses:
+A previous implementation used:
 
 ```text
-NIC1 = NAT
+8080
 ```
 
-The host's:
+and failed:
 
 ```text
-127.0.0.1
-```
-
-is NOT automatically reachable as the host from inside a VirtualBox NAT guest.
-
-Therefore this is wrong:
-
-```text
-preseed/url=http://127.0.0.1:8080/preseed.cfg
-```
-
-because inside the guest, `127.0.0.1` refers to the guest itself.
-
-The HTTP server must be reachable from the guest.
-
-There are two viable approaches:
-
-### Approach A: VirtualBox NAT host loopback access
-
-Use the VirtualBox NAT gateway/host address available to the guest, typically:
-
-```text
-10.0.2.2
-```
-
-and bind the HTTP server to:
-
-```text
-0.0.0.0
-```
-
-Then use:
-
-```text
-http://10.0.2.2:<port>/preseed.cfg
-```
-
-This should be verified on the actual VirtualBox version/platform.
-
-### Approach B: Explicit NAT port forwarding
-
-Create a temporary VirtualBox forwarding rule from a host port to the host HTTP server.
-
-However, because the host HTTP server itself is on the host, this approach is unnecessarily complicated.
-
-Preferred first implementation:
-
-```text
-HTTP server:
-0.0.0.0:<dynamic-port>
-
-Debian installer:
-http://10.0.2.2:<dynamic-port>/preseed.cfg
-```
-
-If macOS/VirtualBox networking behavior differs, verify with a small test.
-
----
-
-# 13. Existing main.py problems
-
-The supplied `main.py` had several bugs.
-
-The relevant incorrect sequence was:
-
-```python
-server = PreseedServer(
-    ROOT / "preseed",
-    port=8080,
-)
-
-server.start()
-
-try:
-    vbox.unattended_install(
-        ...
-        preseed_url=server.url("preseed.cfg"),
-    )
-
-    vbox.start(headless=True)
-
-    ssh.wait_for_ssh(...)
-
-finally:
-    server.stop()
-```
-
-Problems:
-
-1. `PreseedServer` was not imported.
-2. `ssh` was used before being created.
-3. The VM was started inside the preseed server block and then started AGAIN later.
-4. `server.stop()` could execute while installation still required the server depending on how the lifecycle was structured.
-5. Fixed port 8080 caused:
-
-   ```text
-   [Errno 98] Address already in use
-   ```
-6. The code said:
-
-   ```text
-   "[+] Unattended installation configured."
-   ```
-
-   before installation was actually complete.
-7. `rebuild_vm()` called:
-
-   ```python
-   cleanup(cfg)
-   create_vm(cfg)
-   provision_vm(cfg)
-   ```
-
-   but `create_vm()` already waits for SSH and should ideally leave the VM in a consistent ready state.
-8. SSH key generation was discussed but the shown `main.py` only created the parent directory; it did not actually invoke `ssh-keygen`.
-9. Cleanup behavior needs to account for VirtualBox deleting the VM and its disk with:
-
-   ```text
-   unregistervm --delete
-   ```
-
-   so manually unlinking the VDI may be redundant.
-10. Error handling around VirtualBox's occasional non-zero `unregistervm` behavior needs to be robust.
-
----
-
-# 14. Existing VirtualBox.py design
-
-The current class is a wrapper around:
-
-```text
-VBoxManage
-```
-
-with methods:
-
-```text
-exists()
-state()
-create()
-configure()
-create_storage_controller()
-create_disk()
-attach_disk()
-attach_iso()
-unattended_install()
-start()
-wait_for_poweroff()
-stop()
-delete()
-```
-
----
-
-# 15. Current VirtualBox configuration
-
-CPU and memory come from config.
-
-Network:
-
-```text
---nic1 nat
-```
-
-Boot order:
-
-```text
-dvd
-disk
-none
-none
-```
-
-NAT SSH forwarding:
-
-```text
---nat-pf1
-ssh,tcp,127.0.0.1,2222,,22
-```
-
-Storage:
-
-```text
-SATA Controller
-IntelAhci
-```
-
-Disk:
-
-```text
-VDI
-```
-
-ISO attached at SATA port 1.
-
-Disk attached at SATA port 0.
-
----
-
-# 16. Current unattended_install problem
-
-The current version looked approximately like:
-
-```python
-self.run(
-    "unattended",
-    "install",
-    self.name,
-    "--iso",
-    str(iso),
-    "--user",
-    user,
-    "--user-password",
-    password,
-    "--full-user-name",
-    full_user_name,
-    "--hostname",
-    hostname,
-    "--locale",
-    "en_US",
-    "--time-zone",
-    "UTC",
-    "--no-install-additions",
-    "--package-selection-adjustment",
-    "minimal",
-)
-```
-
-This correctly uses:
-
-```text
---package-selection-adjustment minimal
-```
-
-but does not provide Debian preseed configuration.
-
-The new implementation should add:
-
-```text
---extra-install-kernel-parameters
-```
-
-with parameters that tell the Debian installer to retrieve the preseed file.
-
-Conceptually:
-
-```text
-auto=true priority=critical preseed/url=http://10.0.2.2:<PORT>/preseed.cfg
-```
-
-The exact quoting/argument handling must be implemented so `VBoxManage` receives it as one argument.
-
----
-
-# 17. Debian preseed requirements
-
-The preseed must produce a minimal CLI development VM.
-
-At minimum it needs to configure:
-
-```text
-Debian mirror
-locale
-keyboard
-timezone
-hostname
-user
-password or password hash
-partitioning
-bootloader
-package selection
-SSH server
-```
-
-Most importantly:
-
-```text
-openssh-server
-```
-
-must be installed.
-
-The package selection should explicitly avoid desktop packages.
-
-Do NOT select:
-
-```text
-desktop
-gnome
-kde
-xfce
-firefox
-libreoffice
-```
-
-The intended base is a server/CLI system.
-
-A minimal package list should include only what is needed, e.g.:
-
-```text
-openssh-server
-sudo
-ca-certificates
-curl
-git
-build-essential
-```
-
-Additional development tools can be installed later through:
-
-```text
-scripts/provision.sh
-```
-
-The exact package list should be deliberately controlled.
-
----
-
-# 18. Important preseed package-selection concept
-
-Debian preseed package selection should not blindly copy the old full Debian task selection.
-
-The installer should avoid desktop tasks.
-
-For example, package selection should conceptually look like:
-
-```text
-tasksel tasksel/first multiselect standard
-d-i pkgsel/include string openssh-server sudo ca-certificates curl git build-essential
-```
-
-But this must be checked against the actual Debian 13 installer behavior.
-
-If the goal is truly minimal, `standard` itself may pull more packages than desired.
-
-A better approach is to explicitly understand what Debian installer task selection is enabled by default and disable desktop/task packages.
-
-The generated preseed should therefore be tested rather than assuming that:
-
-```text
-tasksel/first multiselect
-```
-
-means zero packages.
-
----
-
-# 19. SSH authentication design
-
-The Debian installer needs to create:
-
-```text
-dev
-```
-
-with the password from:
-
-```text
-cfg["installer"]["password"]
-```
-
-This password is currently used by VirtualBox's unattended installer.
-
-The project-generated SSH public key should ideally be installed into:
-
-```text
-/home/dev/.ssh/authorized_keys
-```
-
-This can be done in the preseed via late command or after first SSH login.
-
-The simpler staged design is:
-
-1. Preseed creates `dev` with password.
-2. Preseed installs `openssh-server`.
-3. VM boots.
-4. SSH is reachable.
-5. `SSHProvisioner` uses the password initially if key auth is not yet configured.
-
-However, the current `SSHProvisioner` is designed around:
-
-```text
--i state/ssh/debian-vm_ed25519
-```
-
-so public-key authentication must eventually be configured.
-
-The cleanest design is to have preseed place the public key into `authorized_keys`, meaning the VM is immediately reachable using the generated key.
-
----
-
-# 20. SSH key generation
-
-Current intended key paths:
-
-```text
-state/ssh/debian-vm_ed25519
-state/ssh/debian-vm_ed25519.pub
-```
-
-The project should generate them automatically if missing.
-
-Conceptually:
-
-```bash
-ssh-keygen \
-    -t ed25519 \
-    -f state/ssh/debian-vm_ed25519 \
-    -N ""
-```
-
-Do not regenerate the key every time `create` runs unless the old key has been deliberately cleaned.
-
-`clean` can remove the project-owned keys.
-
----
-
-# 21. Preseed public-key handling
-
-Because `preseed.cfg` needs the public key, there are two possible designs.
-
-### Option 1 — generate preseed dynamically
-
-Recommended.
-
-Do not hardcode a user-specific public key into the repository.
-
-Python can:
-
-1. generate/read the public key
-2. load a template
-3. substitute the public key
-4. write a temporary/generated preseed file
-5. serve that generated file
-
-For example:
-
-```text
-preseed/preseed.cfg.template
-```
-
-with:
-
-```text
-{{SSH_PUBLIC_KEY}}
-```
-
-Then Python renders:
-
-```text
-state/preseed.cfg
-```
-
-and serves that.
-
-### Option 2 — preseed installs password SSH first
-
-Simpler but less secure and less aligned with the project's key-based SSH design.
-
-Option 1 is preferred.
-
----
-
-# 22. Current preseed directory
-
-Current tree contains:
-
-```text
-preseed/preseed.cfg
-```
-
-But it may need to become:
-
-```text
-preseed/
-    preseed.cfg.template
-```
-
-or remain:
-
-```text
-preseed/preseed.cfg
-```
-
-if the public key is inserted through a separate mechanism.
-
-Do not commit a private key.
-
----
-
-# 23. Provisioning stage
-
-After SSH becomes available:
-
-```text
-scripts/provision.sh
-```
-
-should install/configure development tooling not needed during Debian installation.
-
-This is the correct place for things such as:
-
-```text
-git
-curl
-wget
-build-essential
-python3
-python3-pip
-python3-venv
-pkg-config
-clang
-gdb
-strace
-ripgrep
-tmux
-vim/neovim
-```
-
-Only packages actually desired should be included.
-
-The base Debian installation should remain minimal.
-
----
-
-# 24. Current command-line interface
-
-`main.py` supports:
-
-```text
-create
-provision
-destroy
-clean
-rebuild
-status
-```
-
-Expected usage:
-
-```bash
-python3 main.py create
-```
-
-```bash
-python3 main.py provision
-```
-
-```bash
-python3 main.py destroy
-```
-
-```bash
-python3 main.py clean
-```
-
-```bash
-python3 main.py rebuild
-```
-
-```bash
-python3 main.py status
-```
-
-Debug mode:
-
-```bash
-python3 main.py create --keep-on-failure
-```
-
----
-
-# 25. Important lifecycle decision
-
-`create` should ideally perform the complete VM bootstrap:
-
-```text
-create VM
-configure VM
-create disk
-attach disk
-attach ISO
-generate SSH key
-start temporary preseed HTTP server
-configure unattended install with preseed kernel parameters
-start VM
-wait for SSH
-stop preseed server
-return success
-```
-
-Then:
-
-```text
-provision
-```
-
-is responsible only for running:
-
-```text
-scripts/provision.sh
-```
-
-over SSH.
-
-`rebuild` should therefore be:
-
-```text
-clean
-create
-provision
-```
-
----
-
-# 26. Current failure: HTTP server port collision
-
-Exact error:
-
-```text
-[!] VM creation failed.
-[!] VM was preserved for debugging.
-[ERROR] Could not start preseed HTTP server on port 8080:
 [Errno 98] Address already in use
 ```
 
-Cause:
+Therefore the server must not assume that 8080 is available.
 
-```text
-port 8080 is already occupied.
-```
-
-Required fix:
-
-Do not hard-code:
+Preferred implementation:
 
 ```python
-PreseedServer(..., port=8080)
-```
-
-unless collision handling is implemented.
-
-Prefer:
-
-```python
-PreseedServer(
-    ROOT / "preseed",
-    host="0.0.0.0",
-    port=0,
-)
-```
-
-where:
-
-```text
 port=0
 ```
 
-means the OS chooses an unused ephemeral port.
+When a server binds to port `0`, the operating system chooses a free ephemeral port.
 
-The server must expose the actual selected port through something like:
+The implementation must then expose:
 
 ```python
 server.port
 ```
 
-and:
+so `main.py` can construct the actual URL.
 
-```python
-server.url("preseed.cfg")
-```
-
-must return the reachable guest URL, not `127.0.0.1`.
-
-For VirtualBox NAT, likely:
+Conceptually:
 
 ```text
-http://10.0.2.2:<selected_port>/preseed.cfg
+0.0.0.0:0
+      |
+      v
+OS chooses 49152
+      |
+      v
+0.0.0.0:49152
 ```
 
 ---
 
-# 27. Current failure: SSH connection reset
+# 29. Preseed server interface
 
-Exact error:
-
-```text
-ssh -p 2222 dev@127.0.0.1
-
-kex_exchange_identification: read: Connection reset by peer
-Connection reset by 127.0.0.1 port 2222
-```
-
-This is not caused by:
-
-```text
-StrictHostKeyChecking
-```
-
-It means SSH is not yet usable in the guest.
-
-Likely causes:
-
-1. Debian installation has not finished.
-2. `openssh-server` was not installed.
-3. `sshd` is not running.
-4. The VM is still in installer state.
-5. The preseed was not fetched.
-6. The preseed package selection failed.
-7. NAT forwarding is correct but guest port 22 is closed.
-
-The automation must wait for actual SSH readiness instead of assuming the VM is ready immediately after `startvm`.
-
----
-
-# 28. Critical race condition to avoid
-
-Do not do:
-
-```python
-vbox.unattended_install(...)
-vbox.start()
-
-server.stop()
-```
-
-immediately after `start()`.
-
-The Debian installer still needs the HTTP server while installation is running.
-
-The HTTP server must remain alive until the installer has fetched the preseed.
-
-At minimum:
-
-```text
-start server
-configure VM with preseed URL
-start VM
-wait until installer is finished / SSH available
-stop server
-```
-
-A robust implementation can keep the server alive until SSH is available.
-
----
-
-# 29. Another critical issue: VirtualBox unattended install semantics
-
-`VBoxManage unattended install` primarily configures the VM and creates unattended installation files/scripts.
-
-It does not mean the Debian installation is synchronously complete when the command returns.
-
-Therefore:
-
-```python
-vbox.unattended_install(...)
-```
-
-must NOT be interpreted as:
-
-```text
-Debian installation finished
-```
-
-The VM must then be started and observed.
-
-The actual completion signal in this project is:
-
-```text
-SSH login succeeds
-```
-
-provided the preseed guarantees that `openssh-server` is installed and started.
-
----
-
-# 30. VirtualBox delete failure previously observed
-
-Previous cleanup output:
-
-```text
-[*] Unregistering VM 'debian-dev'...
-$ VBoxManage unregistervm debian-dev --delete
-0%...10%...20%...30%...40%...50%...60%...70%...80%...90%...100%
-[+] Cleanup complete.
-[+] Cleanup complete.
-
-[ERROR] VBoxManage failed with exit code 2
-```
-
-This indicates VirtualBox may successfully remove the VM/storage while returning a non-zero exit code during deletion.
-
-The `delete()` method should therefore:
-
-1. run `unregistervm --delete`
-2. inspect the return code
-3. if non-zero, check `exists()`
-4. if the VM no longer exists, consider deletion successful
-5. only raise if the VM still exists
-
-The current code already attempted this behavior.
-
-However, the surrounding cleanup logic should avoid printing:
-
-```text
-[+] Cleanup complete.
-```
-
-twice.
-
-There should be one clear success path.
-
----
-
-# 31. Cleanup behavior
-
-`clean` should remove:
-
-```text
-VM registration
-VM storage
-VDI if it still exists
-project-generated SSH keys
-empty state directories
-```
-
-But do not blindly unlink a VDI if VirtualBox still owns it.
-
-Preferred order:
-
-```text
-VirtualBox unregistervm --delete
-verify VM gone
-verify disk gone
-only remove leftover disk if safe
-remove generated SSH keys
-remove empty directories
-```
-
----
-
-# 32. Important Python syntax corrections
-
-The original pasted source contains formatting corruption such as:
-
-```python
-ROOT = Path(**file**)
-```
-
-The actual Python must be:
-
-```python
-ROOT = Path(__file__).resolve().parent
-```
-
-Likewise:
-
-```python
-if **name** == "**main**":
-```
-
-must be:
-
-```python
-if __name__ == "__main__":
-    main()
-```
-
-The indentation shown in several pasted snippets is also Markdown-corrupted. The final files must use normal Python indentation.
-
----
-
-# 33. Required files for the next implementation
-
-The next LLM should produce/fix these files:
-
-```text
-main.py
-vm/virtualbox.py
-vm/ssh.py
-preseed.py
-```
-
-Potentially also:
-
-```text
-preseed/preseed.cfg
-```
-
-or:
-
-```text
-preseed/preseed.cfg.template
-```
-
-if dynamic public-key injection is implemented.
-
-The current user explicitly requested a complete correction of these scripts.
-
----
-
-# 34. Desired `preseed.py`
-
-A dedicated module should encapsulate the HTTP server.
-
-Suggested interface:
+`vm/preseed.py` should provide approximately:
 
 ```python
 class PreseedServer:
@@ -1361,23 +1177,115 @@ class PreseedServer:
         ...
 ```
 
-Requirements:
+The implementation must:
 
-* standard library only
-* dynamic port support
-* background thread
-* clean shutdown
-* verify directory exists
-* serve only intended preseed directory
-* expose selected port
-* URL should be reachable from Debian installer
-* do not use `127.0.0.1` in the guest URL
+* create the server
+* bind the requested host
+* support dynamic ports
+* run in a background thread
+* expose the selected port
+* serve only the intended directory
+* shut down cleanly
+* not require external dependencies
 
 ---
 
-# 35. Desired VirtualBox.unattended_install interface
+# 30. Important NAT/preseed networking detail
 
-It should become approximately:
+The Debian installer runs **inside the VM**.
+
+Therefore:
+
+```text
+127.0.0.1
+```
+
+from the Debian installer refers to:
+
+```text
+the Debian VM itself
+```
+
+It does not refer to the host.
+
+Therefore this is incorrect:
+
+```text
+preseed/url=http://127.0.0.1:<port>/preseed.cfg
+```
+
+The intended VirtualBox NAT host address is:
+
+```text
+10.0.2.2
+```
+
+Therefore the server should bind:
+
+```text
+0.0.0.0:<dynamic-port>
+```
+
+and the Debian installer should receive:
+
+```text
+http://10.0.2.2:<dynamic-port>/preseed.cfg
+```
+
+This assumption should be tested on the target VirtualBox environment.
+
+---
+
+# 31. Preseed URL lifecycle
+
+The server must remain alive throughout the part of installation that requires it.
+
+Correct sequence:
+
+```text
+start PreseedServer
+        |
+        v
+obtain selected port
+        |
+        v
+construct preseed URL
+        |
+        v
+configure VBox unattended install
+        |
+        v
+start VM
+        |
+        v
+Debian installer downloads preseed
+        |
+        v
+installation completes
+        |
+        v
+SSH becomes available
+        |
+        v
+stop PreseedServer
+```
+
+Incorrect:
+
+```text
+start server
+configure VBox
+stop server
+start VM
+```
+
+because the Debian installer would no longer be able to retrieve the preseed.
+
+---
+
+# 32. VirtualBox unattended installation
+
+`vm/virtualbox.py` should expose something similar to:
 
 ```python
 def unattended_install(
@@ -1389,15 +1297,10 @@ def unattended_install(
     hostname: str,
     preseed_url: str,
 ) -> None:
+    ...
 ```
 
-It should call:
-
-```text
-VBoxManage unattended install
-```
-
-with:
+The generated `VBoxManage` command should include the relevant unattended-install options:
 
 ```text
 --iso
@@ -1411,60 +1314,1182 @@ with:
 --extra-install-kernel-parameters
 ```
 
-The kernel parameter value should contain:
+The kernel parameters should conceptually contain:
 
 ```text
 auto=true
 priority=critical
-preseed/url=<URL>
+preseed/url=http://10.0.2.2:<port>/preseed.cfg
 ```
 
-Potentially Debian installer parameters such as:
-
-```text
-netcfg/disable_autoconfig=false
-```
-
-can be added if necessary, but do not add arbitrary parameters without a reason.
+They must be passed to `VBoxManage` as the appropriate single argument.
 
 ---
 
-# 36. Important package-selection goal
+# 33. Important unattended-install semantic
 
-The Debian installer must NOT install the desktop environment.
-
-The resulting VM should be CLI-only.
-
-The preseed should explicitly control:
+This command:
 
 ```text
-tasksel
-pkgsel/include
+VBoxManage unattended install ...
 ```
 
-and avoid desktop tasks.
-
-The required SSH package is:
+does not mean:
 
 ```text
-openssh-server
+Debian installation is finished
 ```
 
-The preseed should ensure it is installed before first boot.
+It configures the unattended installation.
+
+The actual installation occurs after the VM is started.
+
+Therefore:
+
+```python
+vbox.unattended_install(...)
+```
+
+must be followed by:
+
+```python
+vbox.start(...)
+```
+
+and then:
+
+```python
+ssh.wait_for_ssh(...)
+```
 
 ---
 
-# 37. Expected final bootstrap
+# 34. VM creation lifecycle
 
-The intended successful log should resemble:
+`create_vm()` should conceptually perform:
 
 ```text
-[*] VM name: debian-dev
-[*] VM directory: /goinfre/mberraho/debian-vm
-[*] VM disk: /goinfre/mberraho/debian-vm/debian-dev.vdi
-[*] Debian ISO: /goinfre/mberraho/debian-13.6.0-amd64-netinst.iso
+1. Check VM does not already exist.
+2. Ensure ISO exists and is verified.
+3. Ensure SSH keypair exists.
+4. Generate/render preseed.
+5. Create VM.
+6. Configure VM.
+7. Create storage controller.
+8. Create virtual disk.
+9. Attach disk.
+10. Attach ISO.
+11. Start preseed HTTP server.
+12. Configure unattended Debian installation.
+13. Start VM.
+14. Wait for SSH.
+15. Stop preseed server.
+16. Report success.
+```
 
-[*] Generating SSH key...
+The preseed server must be cleaned up in `finally`.
+
+---
+
+# 35. Do not start the VM twice
+
+A previous implementation accidentally performed:
+
+```text
+vbox.start()
+```
+
+inside one part of `create_vm()` and then started the VM again later.
+
+This must not happen.
+
+There should be exactly one:
+
+```python
+vbox.start(headless=True)
+```
+
+per creation attempt.
+
+---
+
+# 36. VM failure policy
+
+`create_vm()` deliberately does **not** automatically destroy the VM on failure.
+
+This is important for debugging.
+
+If installation fails, the VM should remain available so the user can inspect it:
+
+```bash
+python3 main.py status
+```
+
+```bash
+VBoxManage showvminfo debian-dev
+```
+
+```bash
+VBoxManage startvm debian-dev --type gui
+```
+
+```bash
+python3 main.py destroy
+```
+
+The application should therefore distinguish:
+
+```text
+automatic cleanup
+```
+
+from:
+
+```text
+explicit destructive cleanup
+```
+
+---
+
+# 37. `rebuild`
+
+`rebuild` is intentionally destructive.
+
+Its intended sequence is:
+
+```python
+cleanup(cfg)
+create_vm(cfg)
+provision_vm(cfg)
+```
+
+Therefore:
+
+```bash
+uv run python main.py rebuild
+```
+
+means:
+
+```text
+delete existing VM/state
+ensure ISO
+create a fresh VM
+install Debian
+configure SSH
+run provisioning
+```
+
+This is the main "move to another 42 machine and recreate everything" workflow.
+
+---
+
+# 38. `create`
+
+The intended command:
+
+```bash
+uv run python main.py create
+```
+
+creates the VM but should not unnecessarily destroy an existing VM.
+
+If the VM already exists, it should fail with a useful message:
+
+```text
+VM 'debian-dev' already exists.
+Use:
+    python3 main.py status
+or destroy it explicitly with:
+    python3 main.py destroy
+```
+
+---
+
+# 39. `provision`
+
+The intended command:
+
+```bash
+uv run python main.py provision
+```
+
+assumes the VM already exists.
+
+It:
+
+1. checks the VM
+2. checks the SSH private key
+3. waits for SSH
+4. executes:
+
+```text
+scripts/provision.sh
+```
+
+inside the VM.
+
+Provisioning is deliberately separated from VM creation.
+
+---
+
+# 40. `destroy`
+
+The intended command:
+
+```bash
+uv run python main.py destroy
+```
+
+deletes the VirtualBox VM.
+
+It should not silently destroy unrelated files.
+
+---
+
+# 41. `clean`
+
+`clean` is explicit destructive project cleanup.
+
+It is intended to remove:
+
+```text
+VM
+VM storage
+leftover VDI
+generated SSH keys
+empty state directories
+```
+
+It should not recursively delete arbitrary `/goinfre` content.
+
+In particular, do not replace the cleanup with:
+
+```python
+shutil.rmtree(vm_directory)
+```
+
+without carefully constraining the target.
+
+---
+
+# 42. Previous cleanup bug
+
+A previous `rebuild` produced:
+
+```text
+[*] VM does not exist.
+```
+
+but VirtualBox still had:
+
+```text
+/goinfre/mberraho/debian-vm/debian-dev/debian-dev.vbox
+```
+
+Then creation failed:
+
+```text
+VBoxManage: error: Machine settings file
+'/goinfre/mberraho/debian-vm/debian-dev/debian-dev.vbox'
+already exists
+```
+
+This demonstrates an important distinction:
+
+```text
+VirtualBox registry state
+```
+
+and:
+
+```text
+filesystem state
+```
+
+are not necessarily identical.
+
+A VM can be unregistered while its directory still exists.
+
+Therefore `cleanup()` must handle stale filesystem state.
+
+---
+
+# 43. Correct cleanup principle
+
+The cleanup logic should verify:
+
+```text
+Is VM registered?
+```
+
+and independently:
+
+```text
+Does VM directory exist?
+```
+
+and:
+
+```text
+Does VDI exist?
+```
+
+If the VM is not registered but the expected VM directory is stale, it is safe to remove that **known project-owned VM directory** during explicit:
+
+```text
+clean
+rebuild
+```
+
+provided the path is derived from the configured VM base directory and VM name.
+
+This is the specific reason the earlier cleanup implementation failed.
+
+---
+
+# 44. Recommended cleanup sequence
+
+Conceptually:
+
+```text
+1. Check whether VirtualBox knows the VM.
+2. If registered:
+       unregistervm --delete
+3. Verify the VM is no longer registered.
+4. If the expected VM directory still exists:
+       remove the stale project-owned VM directory.
+5. If the configured VDI still exists:
+       remove it if it is no longer owned by a registered VM.
+6. Remove generated SSH keys.
+7. Remove empty state directories.
+```
+
+The cleanup must remain explicit and deterministic.
+
+---
+
+# 45. VirtualBox delete exit-code behavior
+
+A previous `unregistervm --delete` operation successfully removed the VM but returned:
+
+```text
+exit code 2
+```
+
+Therefore `VirtualBox.delete()` should not blindly assume:
+
+```text
+non-zero = deletion failed
+```
+
+A robust implementation should:
+
+```text
+run unregistervm --delete
+        |
+        +-- return code 0
+        |      -> success
+        |
+        +-- non-zero
+               |
+               +-- check whether VM still exists
+                       |
+                       +-- does not exist -> treat as success
+                       |
+                       +-- still exists -> raise error
+```
+
+The cleanup output should not print:
+
+```text
+[+] Cleanup complete.
+```
+
+multiple times.
+
+---
+
+# 46. Current `cleanup()` issue
+
+The previous beginning of the function was:
+
+```python
+def cleanup(cfg: dict) -> None:
+    print("[*] Cleaning project resources...")
+
+    vbox = VirtualBox(
+        cfg["vm"]["name"]
+    )
+
+    if vbox.exists():
+        print(
+            f"[*] Removing VM "
+            f"'{cfg['vm']['name']}'..."
+        )
+
+        vbox.delete()
+
+    else:
+        print("[*] VM does not exist.")
+
+    disk = vm_disk_path(cfg)
+
+    if disk.exists():
+        print(
+            f"[*] Removing virtual disk: {disk}"
+        )
+
+        disk.unlink()
+
+    vm_directory = disk.parent
+
+    if vm_directory.exists():
+        try:
+            vm_directory.rmdir()
+        except OSError:
+            pass
+```
+
+The problem is that:
+
+```text
+vm_directory
+```
+
+is:
+
+```text
+/goinfre/mberraho/debian-vm
+```
+
+while VirtualBox actually created:
+
+```text
+/goinfre/mberraho/debian-vm/debian-dev/
+```
+
+The stale `.vbox` file therefore survived.
+
+Cleanup needs to distinguish:
+
+```text
+base folder:
+    /goinfre/.../debian-vm
+
+VM directory:
+    /goinfre/.../debian-vm/debian-dev
+```
+
+The latter is the directory responsible for the observed creation failure.
+
+---
+
+# 47. SSH key generation
+
+The project owns:
+
+```text
+state/ssh/debian-vm_ed25519
+state/ssh/debian-vm_ed25519.pub
+```
+
+They should be generated automatically.
+
+Conceptually:
+
+```bash
+ssh-keygen \
+    -t ed25519 \
+    -N "" \
+    -f state/ssh/debian-vm_ed25519 \
+    -C debian-dev
+```
+
+The key must not be regenerated on every `create`.
+
+Expected behavior:
+
+```text
+private + public key exist
+    -> reuse
+
+neither exists
+    -> generate
+
+only one exists
+    -> report incomplete keypair
+```
+
+`clean` is allowed to remove project-generated keys.
+
+The private key must never be committed to Git.
+
+---
+
+# 48. Public-key installation
+
+The generated public key needs to reach:
+
+```text
+/home/dev/.ssh/authorized_keys
+```
+
+The cleanest architecture is to generate the preseed dynamically.
+
+The repository should not contain a user-specific public key.
+
+Preferred design:
+
+```text
+preseed.cfg.template
+        |
+        +-- SSH_PUBLIC_KEY placeholder
+        |
+        v
+Python renders generated preseed
+        |
+        v
+temporary HTTP server
+        |
+        v
+Debian installer
+        |
+        v
+authorized_keys
+```
+
+This keeps machine-specific state outside source control.
+
+---
+
+# 49. Preseed template
+
+A possible structure is:
+
+```text
+preseed/
+    preseed.cfg.template
+```
+
+containing a placeholder such as:
+
+```text
+__SSH_PUBLIC_KEY__
+```
+
+Python can replace that with the generated public key before starting the HTTP server.
+
+The generated result should not be committed.
+
+---
+
+# 50. Debian user
+
+The guest user is:
+
+```text
+dev
+```
+
+The exact user configuration is controlled by:
+
+```yaml
+ssh:
+    user: dev
+```
+
+The installer password comes from:
+
+```yaml
+installer:
+    password: ...
+```
+
+The full user name comes from:
+
+```yaml
+installer:
+    full_user_name: ...
+```
+
+The hostname is generated from the VM name:
+
+```text
+debian-dev.local
+```
+
+or equivalent configured hostname.
+
+---
+
+# 51. `sudo`
+
+The base system should have:
+
+```text
+sudo
+```
+
+installed.
+
+The user:
+
+```text
+dev
+```
+
+should be allowed to use sudo.
+
+The exact passwordless-sudo policy should be explicitly controlled rather than assumed.
+
+If the goal is a development VM where provisioning can execute non-interactively, `provision.sh` must be able to run the required privileged operations without hanging on an interactive password prompt.
+
+This should be solved deliberately through Debian account configuration or the provisioning mechanism, rather than by randomly modifying SSH behavior.
+
+---
+
+# 52. Provisioning design
+
+The base installation should remain small.
+
+The project intentionally divides dependencies into:
+
+```text
+boot/install dependencies
+```
+
+and:
+
+```text
+development dependencies
+```
+
+For example:
+
+```text
+preseed:
+    openssh-server
+    sudo
+    minimal base packages
+
+provision.sh:
+    compiler
+    debugger
+    git
+    Python tooling
+    CLI tools
+    other development dependencies
+```
+
+This makes the VM easier to recreate and maintain.
+
+---
+
+# 53. VS Code use case
+
+The VM is designed to work well with VS Code Remote SSH.
+
+The architecture is:
+
+```text
+VS Code
+    |
+    | SSH
+    v
+127.0.0.1:2222
+    |
+    | VirtualBox NAT
+    v
+Debian VM
+    |
+    +-- project files
+    +-- compiler
+    +-- debugger
+    +-- development tools
+```
+
+The host only needs VS Code's SSH connection to:
+
+```text
+127.0.0.1:2222
+```
+
+The actual development environment lives inside Debian.
+
+This is useful because the VM becomes a reproducible development environment rather than relying on whatever packages happen to be installed on the 42 host.
+
+---
+
+# 54. No desktop environment
+
+The VM should not install:
+
+```text
+GNOME
+KDE
+XFCE
+Firefox
+LibreOffice
+```
+
+The development workflow is:
+
+```text
+host VS Code
+      |
+      v
+SSH
+      |
+      v
+CLI Debian VM
+```
+
+There is no reason for the VM to run a graphical desktop.
+
+This reduces:
+
+```text
+disk usage
+RAM usage
+CPU usage
+installation time
+```
+
+---
+
+# 55. `config.yaml`
+
+There is only one project configuration file:
+
+```text
+config.yaml
+```
+
+The user should not need to create an additional configuration file.
+
+It contains configuration such as:
+
+```yaml
+vm:
+    name: debian-dev
+    goinfre_root: /goinfre
+    disk_directory: debian-vm
+    disk_filename: debian-dev.vdi
+    cpus: ...
+    memory_mb: ...
+    disk_mb: ...
+
+debian:
+    iso_filename: debian-13.6.0-amd64-netinst.iso
+    iso_url: ...
+    checksum_url: ...
+
+ssh:
+    user: dev
+    private_key: state/ssh/debian-vm_ed25519
+    public_key: state/ssh/debian-vm_ed25519.pub
+
+installer:
+    password: ...
+    full_user_name: ...
+    timeout_seconds: ...
+
+network:
+    ssh_host_port: 2222
+```
+
+The exact values belong to the actual repository.
+
+Do not introduce another configuration layer unless there is a concrete requirement.
+
+---
+
+# 56. `main.py` responsibilities
+
+`main.py` owns orchestration.
+
+It should contain functions such as:
+
+```text
+load_config()
+vm_base_path()
+vm_disk_path()
+ssh_private_key_path()
+ssh_public_key_path()
+generate_ssh_keypair()
+generate_preseed()
+remove_stale_ssh_host_key()
+create_vm()
+provision_vm()
+destroy_vm()
+cleanup()
+rebuild_vm()
+status_vm()
+main()
+```
+
+It should not contain low-level VirtualBox command construction.
+
+That belongs in:
+
+```text
+vm/virtualbox.py
+```
+
+Likewise, SSH command construction belongs in:
+
+```text
+vm/ssh.py
+```
+
+ISO management belongs in:
+
+```text
+vm/iso.py
+```
+
+Preseed serving belongs in:
+
+```text
+vm/preseed.py
+```
+
+---
+
+# 57. `vm/virtualbox.py` responsibilities
+
+This module wraps:
+
+```text
+VBoxManage
+```
+
+and should provide methods such as:
+
+```text
+exists()
+state()
+create()
+configure()
+create_storage_controller()
+create_disk()
+attach_disk()
+attach_iso()
+unattended_install()
+start()
+stop()
+wait_for_poweroff()
+delete()
+```
+
+The rest of the application should not need to construct raw `VBoxManage` arguments.
+
+This creates a clean abstraction:
+
+```text
+main.py
+    |
+    v
+VirtualBox(...)
+    |
+    v
+VBoxManage
+```
+
+---
+
+# 58. VirtualBox configuration
+
+The VM should use:
+
+```text
+NIC1 = NAT
+```
+
+SSH forwarding:
+
+```text
+ssh,tcp,127.0.0.1,2222,,22
+```
+
+Storage:
+
+```text
+SATA Controller
+IntelAhci
+```
+
+Disk:
+
+```text
+VDI
+```
+
+Typical attachment:
+
+```text
+disk -> SATA port 0
+ISO  -> SATA port 1
+```
+
+Boot order:
+
+```text
+DVD
+Disk
+None
+None
+```
+
+The exact VirtualBox command details remain encapsulated in `vm/virtualbox.py`.
+
+---
+
+# 59. Current CLI
+
+The project supports:
+
+```bash
+uv run python main.py create
+```
+
+```bash
+uv run python main.py provision
+```
+
+```bash
+uv run python main.py destroy
+```
+
+```bash
+uv run python main.py clean
+```
+
+```bash
+uv run python main.py rebuild
+```
+
+```bash
+uv run python main.py status
+```
+
+The most useful command for a fresh machine is:
+
+```bash
+uv run python main.py rebuild
+```
+
+because it guarantees that the VM is recreated from the current project state.
+
+---
+
+# 60. `uv`
+
+The project can be executed using:
+
+```bash
+uv run python main.py rebuild
+```
+
+A separate:
+
+```bash
+uv sync
+```
+
+is not required immediately beforehand when using:
+
+```bash
+uv run
+```
+
+provided the project's dependencies/environment are already correctly described by the project configuration.
+
+`uv run` is responsible for preparing/using the project environment as needed.
+
+The project should not add unnecessary dependency-management complexity.
+
+---
+
+# 61. No additional runtime dependency for ISO/preseed
+
+The ISO manager must not introduce:
+
+```text
+requests
+wget
+curl
+aiohttp
+```
+
+just to download the ISO.
+
+Python already provides:
+
+```python
+urllib.request
+```
+
+The preseed server must not introduce:
+
+```text
+Flask
+FastAPI
+aiohttp
+```
+
+Python already provides:
+
+```python
+http.server
+socketserver
+threading
+```
+
+This keeps the project lightweight and portable.
+
+---
+
+# 62. Error handling philosophy
+
+There are three categories of failures.
+
+### Recoverable/retryable
+
+Examples:
+
+```text
+ISO download failed
+checksum mismatch
+HTTP port collision
+SSH not ready yet
+```
+
+These should have useful error messages and, where appropriate, retry behavior.
+
+### Existing-state errors
+
+Examples:
+
+```text
+VM already exists
+partial SSH keypair exists
+disk unexpectedly exists
+```
+
+These should not silently destroy data.
+
+### Explicit destructive operations
+
+Examples:
+
+```text
+clean
+destroy
+rebuild
+```
+
+These are allowed to remove project-owned state.
+
+The application must never silently perform a destructive operation during normal `create`.
+
+---
+
+# 63. VM creation failure behavior
+
+If creation fails:
+
+```text
+do not automatically delete the VM
+```
+
+The output should explain:
+
+```text
+VM was preserved for debugging.
+```
+
+and provide:
+
+```bash
+python3 main.py status
+```
+
+```bash
+VBoxManage showvminfo debian-dev
+```
+
+```bash
+VBoxManage startvm debian-dev --type gui
+```
+
+```bash
+python3 main.py destroy
+```
+
+This is particularly important for debugging Debian installer/preseed failures.
+
+---
+
+# 64. Preseed failure debugging
+
+If SSH never becomes available, inspect the VM using the GUI:
+
+```bash
+VBoxManage startvm debian-dev --type gui
+```
+
+The installer screen can reveal:
+
+```text
+preseed URL unreachable
+package installation failure
+network failure
+partitioning failure
+installer prompt
+```
+
+The preseed server should also print requests when useful, allowing confirmation that:
+
+```text
+Debian installer actually fetched /preseed.cfg
+```
+
+The critical diagnostic distinction is:
+
+```text
+Did Debian request the preseed?
+```
+
+versus:
+
+```text
+Did Debian request it but reject its contents?
+```
+
+versus:
+
+```text
+Did Debian install it but fail to start SSH?
+```
+
+---
+
+# 65. Expected successful bootstrap
+
+A successful run should resemble:
+
+```text
+[*] Rebuilding VM...
+[*] Cleaning project resources...
+[+] Cleanup complete.
+
+[*] Debian ISO found: /goinfre/.../debian-13.6.0-amd64-netinst.iso
+[*] Checking SHA-512...
+[+] ISO SHA-512: OK
+
+[*] Generating SSH ED25519 keypair...
 [*] Creating VM...
 [*] Configuring VM...
 [*] Creating storage controller...
@@ -1476,194 +2501,496 @@ The intended successful log should resemble:
 [+] Preseed server listening on 0.0.0.0:<dynamic-port>
 [+] Preseed URL: http://10.0.2.2:<dynamic-port>/preseed.cfg
 
-[*] Preparing unattended Debian installation...
+[*] Configuring unattended Debian installation...
 [*] Starting VM...
 [+] VM started.
 
-[*] Waiting for Debian installation / SSH...
-[+] SSH is ready.
+[*] Waiting for Debian installation and SSH...
+[+] SSH connection available.
 
 [+] Debian installation complete.
-[+] VM creation complete.
+[*] Stopping preseed server...
+
+[*] Running provisioning script...
+[+] Provisioning complete.
+
+[+] Rebuild complete.
 ```
 
-Then:
+---
+
+# 66. Expected final SSH usage
+
+The user should be able to run:
 
 ```bash
-python3 main.py provision
+ssh \
+    -i state/ssh/debian-vm_ed25519 \
+    -p 2222 \
+    dev@127.0.0.1
 ```
 
-should run:
+without entering the Debian account password.
+
+The same connection information should be usable by VS Code Remote SSH.
+
+---
+
+# 67. Expected development workflow at 42
+
+The intended workflow is:
 
 ```text
+Arrive at 42 machine A
+        |
+        v
+VM exists on /goinfre
+        |
+        v
+Use VM normally
+```
+
+Then move to another machine:
+
+```text
+Machine B
+    |
+    v
+same project repository
+    |
+    v
+uv run python main.py rebuild
+    |
+    +-- ISO downloaded if necessary
+    +-- VM recreated on local /goinfre
+    +-- Debian installed
+    +-- SSH configured
+    +-- provisioning executed
+    |
+    v
+development environment ready
+```
+
+This avoids depending on the VM being physically located on the previous machine.
+
+---
+
+# 68. What is intentionally persistent
+
+The repository contains the automation.
+
+The VM itself is disposable.
+
+Potential persistent project state:
+
+```text
+config.yaml
 scripts/provision.sh
+preseed configuration/template
+source code
 ```
 
-through SSH.
+Machine-specific state:
+
+```text
+state/ssh/
+```
+
+should generally be treated as generated state.
+
+Large runtime state:
+
+```text
+/goinfre/.../debian-vm/
+```
+
+is disposable.
+
+Large ISO:
+
+```text
+/goinfre/.../debian-13.6.0-amd64-netinst.iso
+```
+
+can be retained between VM rebuilds to avoid downloading it again.
 
 ---
 
-# 38. Current state
+# 69. What should not be committed
 
-The project is NOT yet in a known-good state.
+Do not commit:
 
-The main unresolved problems are:
+```text
+state/ssh/debian-vm_ed25519
+```
 
-1. Correctly integrate Debian preseed.
-2. Correctly inject preseed URL into VirtualBox unattended installation.
-3. Run the temporary HTTP server on a dynamically allocated port.
-4. Make the server reachable from the NAT guest.
-5. Ensure `openssh-server` is installed through preseed.
-6. Ensure SSH is running after installation.
-7. Ensure the generated SSH public key is installed for `dev`.
-8. Ensure `SSHProvisioner` uses:
+The private key is secret material.
 
-   ```text
-   StrictHostKeyChecking=no
-   UserKnownHostsFile=/dev/null
-   ```
-9. Remove the double-VM-start bug.
-10. Ensure `ssh` is constructed before it is used.
-11. Make cleanup robust against VirtualBox exit code 2 after successful deletion.
-12. Ensure the base Debian installation remains CLI/minimal and does not install Firefox, LibreOffice, or a desktop environment.
-13. Avoid fixed port 8080 because it is already occupied on the host.
+Generated VM state should also not be committed:
+
+```text
+.vbox
+.vdi
+/goinfre state
+```
+
+The repository should contain the instructions required to recreate those artifacts.
 
 ---
 
-# 39. Most recent exact failure
+# 70. Important architectural principle
 
-Command:
+The repository should be treated as the source of truth.
+
+The VM should not be treated as the source of truth.
+
+The desired model is:
+
+```text
+Git repository
+    |
+    +-- config
+    +-- preseed
+    +-- provisioning
+    +-- automation
+    |
+    v
+reproducible VM
+```
+
+rather than:
+
+```text
+manually configured VM
+    |
+    +-- unknown state
+    +-- manually installed packages
+    +-- undocumented changes
+```
+
+This is the main reason the project exists.
+
+---
+
+# 71. Things that must not regress
+
+Future changes must preserve all of the following:
+
+```text
+ISO can be automatically downloaded.
+ISO is SHA-512 verified.
+ISO lives on /goinfre.
+VM lives on /goinfre.
+VM resources are configurable.
+VM uses NAT.
+SSH is forwarded through 127.0.0.1:2222.
+SSH uses generated ED25519 keys.
+SSH does not require interactive passwords during normal use.
+Disposable VM host keys do not cause known_hosts failures.
+Debian installation is CLI-only.
+openssh-server is installed during installation.
+sudo is installed.
+Preseed is served temporarily.
+Preseed server uses a dynamically selected port.
+Preseed server is reachable from the NAT guest.
+VM is started exactly once.
+SSH readiness is waited for.
+Provisioning is separate from installation.
+create does not automatically destroy failed VMs.
+clean/rebuild explicitly destroy project state.
+Stale VirtualBox directories are handled.
+No unnecessary external dependencies are introduced.
+```
+
+---
+
+# 72. Things that previously failed
+
+These failures are part of the project's history and should not be reintroduced.
+
+### Fixed-port preseed server
+
+Bad:
+
+```python
+PreseedServer(..., port=8080)
+```
+
+Failure:
+
+```text
+[Errno 98] Address already in use
+```
+
+Correct:
+
+```text
+dynamic port
+```
+
+---
+
+### Wrong host address in preseed URL
+
+Bad:
+
+```text
+http://127.0.0.1:<port>/preseed.cfg
+```
+
+from inside the guest.
+
+Correct for VirtualBox NAT:
+
+```text
+http://10.0.2.2:<port>/preseed.cfg
+```
+
+assuming the VirtualBox NAT host address behaves as expected on the target environment.
+
+---
+
+### Assuming `unattended install` means installation finished
+
+Bad:
+
+```text
+VBoxManage unattended install
+    =
+Debian is ready
+```
+
+Correct:
+
+```text
+unattended install configuration
+        +
+VM start
+        +
+installer
+        +
+reboot
+        +
+SSH readiness
+        =
+VM ready
+```
+
+---
+
+### Starting the VM twice
+
+Bad:
+
+```text
+start()
+...
+start()
+```
+
+Correct:
+
+```text
+one start()
+```
+
+---
+
+### Stopping the preseed server too early
+
+Bad:
+
+```text
+configure unattended install
+stop HTTP server
+start VM
+```
+
+Correct:
+
+```text
+start HTTP server
+configure unattended install
+start VM
+wait for installation/SSH
+stop HTTP server
+```
+
+---
+
+### Treating SSH host-key changes as an authentication problem
+
+Bad assumption:
+
+```text
+new VM
+    ->
+SSH authentication broken
+```
+
+Actual issue:
+
+```text
+new VM
+    ->
+new SSH host key
+    ->
+old known_hosts entry no longer matches
+```
+
+The disposable VM SSH client intentionally avoids persistent host-key storage.
+
+---
+
+### Expecting `--package-selection-adjustment` to install arbitrary packages
+
+Bad:
+
+```text
+--package-selection-adjustment minimal openssh-server
+```
+
+Correct conceptual model:
+
+```text
+package-selection-adjustment
+    =
+VirtualBox installation adjustment
+
+preseed
+    =
+Debian package selection
+```
+
+---
+
+### Checking only the VDI during cleanup
+
+Bad:
+
+```text
+remove disk
+remove base directory
+```
+
+while leaving:
+
+```text
+/goinfre/.../debian-vm/debian-dev/debian-dev.vbox
+```
+
+Correct:
+
+```text
+clean VirtualBox registration
++
+clean stale VM-specific directory
++
+clean leftover disk if safe
+```
+
+---
+
+# 73. Core implementation blueprint
+
+The final architecture should be:
+
+```text
+                         ┌───────────────────────┐
+                         │       config.yaml     │
+                         └───────────┬───────────┘
+                                     │
+                                     v
+                         ┌───────────────────────┐
+                         │       main.py         │
+                         │     orchestration     │
+                         └──────┬────┬─────┬─────┘
+                                │    │     │
+                ┌───────────────┘    │     └────────────────┐
+                v                    v                      v
+       ┌────────────────┐   ┌────────────────┐    ┌────────────────┐
+       │    iso.py      │   │ virtualbox.py  │    │    ssh.py      │
+       │                │   │                │    │                │
+       │ download ISO   │   │ VBoxManage     │    │ SSH client     │
+       │ SHA-512 verify │   │ VM lifecycle   │    │ key auth       │
+       └────────────────┘   └───────┬────────┘    └────────────────┘
+                                    │
+                                    v
+                           ┌──────────────────┐
+                           │   preseed.py     │
+                           │                  │
+                           │ temporary HTTP   │
+                           │ server           │
+                           └────────┬─────────┘
+                                    │
+                                    v
+                           ┌──────────────────┐
+                           │ Debian installer │
+                           │                  │
+                           │ minimal CLI      │
+                           │ sudo             │
+                           │ openssh-server   │
+                           │ authorized_keys  │
+                           └────────┬─────────┘
+                                    │
+                                    v
+                           ┌──────────────────┐
+                           │  Debian VM       │
+                           │                  │
+                           │  dev             │
+                           │  sshd            │
+                           │  NAT             │
+                           └────────┬─────────┘
+                                    │
+                             localhost:2222
+                                    │
+                                    v
+                           ┌──────────────────┐
+                           │ SSHProvisioner   │
+                           └────────┬─────────┘
+                                    │
+                                    v
+                           ┌──────────────────┐
+                           │ provision.sh     │
+                           │                  │
+                           │ development      │
+                           │ dependencies     │
+                           └──────────────────┘
+```
+
+---
+
+# 74. Final design philosophy
+
+The project is fundamentally a **reproducible VM factory**, not merely a VirtualBox wrapper.
+
+Its key properties are:
+
+```text
+Disposable
+Reproducible
+Minimal
+Configurable
+SSH-accessible
+Developer-oriented
+Storage-efficient
+42-friendly
+```
+
+The VM can disappear.
+
+The machine can change.
+
+The `/goinfre` location can change.
+
+The ISO can disappear.
+
+The SSH keys can be regenerated.
+
+The entire environment can still be reconstructed from the repository with:
 
 ```bash
-python3 main.py create
+uv run python main.py rebuild
 ```
 
-Output:
-
-```text
-[*] VM name: debian-dev
-[*] VM directory: /goinfre/mberraho/debian-vm
-[*] VM disk: /goinfre/mberraho/debian-vm/debian-dev.vdi
-[*] Debian ISO: /goinfre/mberraho/debian-13.6.0-amd64-netinst.iso
-[*] SSH private key: /home/mberraho/projects/VM/debian-automation/state/ssh/debian-vm_ed25519
-[*] SSH public key: /home/mberraho/projects/VM/debian-automation/state/ssh/debian-vm_ed25519.pub
-[!] VM creation failed.
-[!] VM was preserved for debugging.
-[ERROR] Could not start preseed HTTP server on port 8080: [Errno 98] Address already in use
-```
-
-After that, manual SSH produced:
-
-```bash
-ssh -p 2222 dev@127.0.0.1
-```
-
-and:
-
-```text
-kex_exchange_identification: read: Connection reset by peer
-Connection reset by 127.0.0.1 port 2222
-```
-
-This is expected if the VM is not fully installed or `openssh-server` is absent.
-
----
-
-# 40. What NOT to do
-
-Do not:
-
-```text
-install openssh-server manually after every VM creation
-```
-
-Do not:
-
-```text
-use Firefox/LibreOffice desktop installation
-```
-
-Do not:
-
-```text
-hard-code HTTP port 8080
-```
-
-Do not:
-
-```text
-use 127.0.0.1 as the Debian guest's address to reach the host HTTP server
-```
-
-Do not:
-
-```text
-append openssh-server after --package-selection-adjustment minimal
-```
-
-Do not:
-
-```text
-start the VM twice
-```
-
-Do not:
-
-```text
-stop the preseed HTTP server immediately after VBoxManage unattended install returns
-```
-
-Do not:
-
-```text
-put SSH host-key options in VirtualBox configuration
-```
-
-Do not:
-
-```text
-run ssh-keygen -R on every connection
-```
-
-Do not:
-
-```text
-hard-code a user's SSH public key into source control
-```
-
----
-
-# 41. Core implementation principle
-
-Separate the system into four layers:
-
-```text
-VirtualBox layer
-    |
-    +-- VM lifecycle
-    +-- disks
-    +-- ISO
-    +-- NAT
-    +-- unattended-install configuration
-
-Preseed HTTP layer
-    |
-    +-- temporarily serves Debian installer configuration
-
-Debian installer
-    |
-    +-- creates user
-    +-- installs minimal system
-    +-- installs openssh-server
-    +-- installs SSH authorized key
-    +-- boots
-
-SSH layer
-    |
-    +-- waits for SSH
-    +-- executes provisioning script
-```
-
-Do not mix these responsibilities.
-
-The next implementation should first make `create` reliably produce a minimal Debian VM with working key-based SSH. Only after that should additional provisioning complexity be added.
+That is the central design goal.
