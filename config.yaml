@@ -8,7 +8,9 @@ vm:
   memory_mb: 4096
 
 debian:
-  iso: /goinfre/mberraho/debian-13.6.0-amd64-netinst.iso
+  iso_filename: debian-13.6.0-amd64-netinst.iso
+  iso_url: https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.6.0-amd64-netinst.iso
+  checksum_url: https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/SHA512SUMS
 
 network:
   ssh_host_port: 2222
@@ -22,6 +24,3 @@ installer:
   password: dev
   full_user_name: Developer
   timeout_seconds: 600
-
-preseed:
-  port: 8080

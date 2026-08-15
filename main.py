@@ -1,11 +1,13 @@
 import argparse
 import getpass
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
 import yaml
 
+from vm.iso import ISOManager, resolve_iso_path
 from vm.preseed import PreseedServer
 from vm.ssh import SSHProvisioner
 from vm.virtualbox import VirtualBox
@@ -196,18 +198,27 @@ def create_vm(cfg: dict) -> None:
             f"    python3 main.py destroy"
         )
 
-    iso = (
-        Path(cfg["debian"]["iso"])
-        .expanduser()
-        .resolve()
+    
+    iso_path = resolve_iso_path(
+        cfg["vm"]["goinfre_root"],
+        cfg["debian"]["iso_filename"],
     )
 
     base_path = vm_base_path(cfg)
     disk = vm_disk_path(cfg)
 
-    if not iso.is_file():
+    iso_manager = ISOManager(
+        iso_path=iso_path,
+        iso_url=cfg["debian"]["iso_url"],
+        checksum_url=cfg["debian"]["checksum_url"],
+    )
+
+    iso_path = iso_manager.ensure()
+
+
+    if not iso_path.is_file():
         raise FileNotFoundError(
-            f"Debian ISO not found: {iso}"
+            f"Debian ISO not found: {iso_path}"
         )
 
     if disk.exists():
@@ -219,7 +230,7 @@ def create_vm(cfg: dict) -> None:
     print(f"[*] VM name: {name}")
     print(f"[*] VM directory: {base_path}")
     print(f"[*] VM disk: {disk}")
-    print(f"[*] Debian ISO: {iso}")
+    print(f"[*] Debian ISO: {iso_path}")
 
     # --------------------------------------------------------------
     # SSH keys
@@ -285,7 +296,7 @@ def create_vm(cfg: dict) -> None:
 
         print("[*] Attaching Debian ISO...")
 
-        vbox.attach_iso(iso)
+        vbox.attach_iso(iso_path)
 
         # ----------------------------------------------------------
         # Preseed HTTP server
@@ -326,7 +337,7 @@ def create_vm(cfg: dict) -> None:
         )
 
         vbox.unattended_install(
-            iso=iso,
+            iso=iso_path,
             user=cfg["ssh"]["user"],
             password=cfg["installer"]["password"],
             full_user_name=cfg["installer"]["full_user_name"],
@@ -511,37 +522,23 @@ def cleanup(cfg: dict) -> None:
         print("[*] VM does not exist.")
 
     # --------------------------------------------------------------
-    # Disk
-    # --------------------------------------------------------------
-
-    disk = vm_disk_path(cfg)
-
-    if disk.exists():
-        print(
-            f"[*] Removing virtual disk: {disk}"
-        )
-
-        disk.unlink()
-
-    # --------------------------------------------------------------
     # VM directory
     # --------------------------------------------------------------
 
-    vm_directory = disk.parent
+    vm_directory = vm_base_path(cfg)
 
     if vm_directory.exists():
-        try:
-            vm_directory.rmdir()
+        print(
+            f"[*] Removing VM directory: "
+            f"{vm_directory}"
+        )
 
-            print(
-                f"[*] Removed empty directory: "
-                f"{vm_directory}"
-            )
+        shutil.rmtree(vm_directory)
 
-        except OSError:
-            # Directory is not empty.
-            # Do not recursively delete it.
-            pass
+        print(
+            f"[+] Removed VM directory: "
+            f"{vm_directory}"
+        )
 
     # --------------------------------------------------------------
     # SSH keys

@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import getpass
 import hashlib
 import urllib.request
 from pathlib import Path
+
+
+def resolve_iso_path(
+    goinfre_root: str,
+    iso_filename: str,
+) -> Path:
+    return (
+        Path(goinfre_root).expanduser()
+        / getpass.getuser()
+        / iso_filename
+    ).resolve()
 
 
 class ISOError(RuntimeError):
@@ -16,15 +28,22 @@ class ISOManager:
         iso_url: str,
         checksum_url: str,
     ):
-        self.iso_path = iso_path
+        self.iso_path = Path(iso_path)
         self.iso_url = iso_url
         self.checksum_url = checksum_url
 
-    def _download(self, url: str, destination: Path) -> None:
+    def _download(
+        self,
+        url: str,
+        destination: Path,
+    ) -> None:
         print(f"[*] Downloading: {url}")
         print(f"[*] Destination: {destination}")
 
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
         with urllib.request.urlopen(url) as response:
             total = response.headers.get("Content-Length")
@@ -44,14 +63,18 @@ class ISOManager:
 
                     if total_size:
                         percent = downloaded * 100 // total_size
+
                         print(
-                            f"\r    {downloaded / 1024 / 1024:.1f} MB ({percent}%)",
+                            f"\r    "
+                            f"{downloaded / 1024 / 1024:.1f} MB "
+                            f"({percent}%)",
                             end="",
                             flush=True,
                         )
                     else:
                         print(
-                            f"\r    {downloaded / 1024 / 1024:.1f} MB",
+                            f"\r    "
+                            f"{downloaded / 1024 / 1024:.1f} MB",
                             end="",
                             flush=True,
                         )
@@ -59,7 +82,14 @@ class ISOManager:
         print()
 
     def _download_checksum_manifest(self) -> str:
-        with urllib.request.urlopen(self.checksum_url) as response:
+        print(
+            f"[*] Downloading checksum manifest: "
+            f"{self.checksum_url}"
+        )
+
+        with urllib.request.urlopen(
+            self.checksum_url
+        ) as response:
             return response.read().decode("utf-8")
 
     def _expected_sha512(self) -> str:
@@ -79,17 +109,34 @@ class ISOManager:
 
             checksum, manifest_filename = parts
 
-            # SHA512SUMS uses "<hash>  <filename>"
+            # Handle both:
+            #
+            #   hash  filename.iso
+            #   hash *filename.iso
+            #
+            manifest_filename = manifest_filename.lstrip("*")
+            manifest_filename = Path(
+                manifest_filename
+            ).name
+
             if manifest_filename == filename:
                 return checksum.lower()
 
-        raise ISOError(f"Could not find {filename} in {self.checksum_url}")
+        raise ISOError(
+            f"Could not find {filename} in "
+            f"{self.checksum_url}"
+        )
 
     def _sha512(self, path: Path) -> str:
         digest = hashlib.sha512()
 
         with path.open("rb") as file:
-            while chunk := file.read(1024 * 1024):
+            while True:
+                chunk = file.read(1024 * 1024)
+
+                if not chunk:
+                    break
+
                 digest.update(chunk)
 
         return digest.hexdigest().lower()
@@ -98,7 +145,10 @@ class ISOManager:
         if not self.iso_path.is_file():
             return False
 
-        print(f"[*] Checking SHA-512: {self.iso_path}")
+        print(
+            f"[*] Checking SHA-512: "
+            f"{self.iso_path}"
+        )
 
         expected = self._expected_sha512()
         actual = self._sha512(self.iso_path)
@@ -115,32 +165,58 @@ class ISOManager:
 
     def ensure(self) -> Path:
         """
-        Ensure that iso_path exists and matches Debian's official SHA-512.
+        Ensure that the Debian ISO exists and is valid.
 
-        Returns the verified ISO path.
+        If the ISO already exists:
+            verify it.
+
+        If verification fails:
+            remove it and download it again.
+
+        If the ISO does not exist:
+            download it.
+
+        The downloaded ISO is verified before it becomes
+        the final ISO path.
         """
 
-        if self.iso_path.exists():
-            print(f"[*] Debian ISO found: {self.iso_path}")
+        if self.iso_path.is_file():
+            print(
+                f"[*] Debian ISO found: "
+                f"{self.iso_path}"
+            )
 
             if self.verify():
                 return self.iso_path
 
-            print("[!] Existing ISO is corrupted.")
+            print("[!] Existing ISO is invalid.")
             print("[*] Removing invalid ISO...")
+
             self.iso_path.unlink()
 
-        print(f"[*] Debian ISO not found: {self.iso_path}")
+        else:
+            print(
+                f"[*] Debian ISO not found: "
+                f"{self.iso_path}"
+            )
 
-        partial = self.iso_path.with_suffix(self.iso_path.suffix + ".part")
+        partial = self.iso_path.with_name(
+            self.iso_path.name + ".part"
+        )
 
         if partial.exists():
-            print(f"[*] Removing incomplete download: {partial}")
+            print(
+                f"[*] Removing incomplete download: "
+                f"{partial}"
+            )
+
             partial.unlink()
 
-        self._download(self.iso_url, partial)
+        self._download(
+            self.iso_url,
+            partial,
+        )
 
-        # Verify the downloaded file BEFORE making it the real ISO.
         print("[*] Verifying downloaded ISO...")
 
         expected = self._expected_sha512()
@@ -150,13 +226,17 @@ class ISOManager:
             partial.unlink(missing_ok=True)
 
             raise ISOError(
-                "Downloaded Debian ISO failed SHA-512 verification.\n"
+                "Downloaded Debian ISO failed "
+                "SHA-512 verification.\n"
                 f"Expected: {expected}\n"
                 f"Actual:   {actual}"
             )
 
         partial.replace(self.iso_path)
 
-        print(f"[+] Debian ISO verified: {self.iso_path}")
+        print(
+            f"[+] Debian ISO verified: "
+            f"{self.iso_path}"
+        )
 
         return self.iso_path
