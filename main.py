@@ -140,7 +140,32 @@ def generate_ssh_keypair(cfg: dict) -> None:
             "ssh-keygen failed"
         )
 
+def remove_stale_ssh_host_key(
+    cfg: dict,
+) -> None:
+    host = "127.0.0.1"
+    port = cfg["network"]["ssh_host_port"]
 
+    print(
+        f"[*] Removing stale SSH host key "
+        f"for [{host}]:{port}..."
+    )
+
+    result = subprocess.run(
+        [
+            "ssh-keygen",
+            "-R",
+            f"[{host}]:{port}",
+        ],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to remove stale SSH host key."
+        )
 # =====================================================================
 # Create VM
 # =====================================================================
@@ -157,6 +182,8 @@ def create_vm(cfg: dict) -> None:
     """
 
     name = cfg["vm"]["name"]
+
+    remove_stale_ssh_host_key(cfg)
 
     vbox = VirtualBox(name)
 
