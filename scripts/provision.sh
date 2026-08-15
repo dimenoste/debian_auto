@@ -16,5 +16,3 @@ sudo apt-get install -y \
     python3-pip
 
 echo "[+] Provisioning complete."
-
-chmod +x scripts/provision.sh
