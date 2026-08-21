@@ -66,8 +66,11 @@ sudo docker compose version
 echo "[+] Provisioning complete."
 
 
-# Configure Git author identity
-git config --global user.name "dimenoste"
-git config --global user.email "65079536+dimenoste@users.noreply.github.com"
+# Configure Git author identity from existing Git configuration
+GIT_USER_NAME="$(git config --global user.name 2>/dev/null || true)"
+GIT_USER_EMAIL="$(git config --global user.email 2>/dev/null || true)"
 
-
+if [[ -n "$GIT_USER_NAME" && -n "$GIT_USER_EMAIL" ]]; then
+    git config --global user.name "$GIT_USER_NAME"
+    git config --global user.email "$GIT_USER_EMAIL"
+fi
