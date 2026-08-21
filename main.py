@@ -1,6 +1,7 @@
 import argparse
 import getpass
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -386,6 +387,30 @@ def create_vm(cfg: dict) -> None:
 # =====================================================================
 
 
+def get_host_git_identity() -> tuple[str, str] | None:
+    def get_git_config(key: str) -> str:
+        result = subprocess.run(
+            ["git", "config", "--global", key],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            return ""
+
+        return result.stdout.strip()
+
+    user_name = get_git_config("user.name")
+    user_email = get_git_config("user.email")
+
+    if not user_name or not user_email:
+        print("[!] Host Git identity not configured. Skipping Git configuration.")
+        return None
+
+    return user_name, user_email
+
+
 def provision_vm(cfg: dict) -> None:
     name = cfg["vm"]["name"]
 
@@ -413,9 +438,22 @@ def provision_vm(cfg: dict) -> None:
 
     print("[*] Running provisioning script...")
 
-    ssh.run_script(ROOT / "scripts" / "provision.sh")
+    git_identity = get_host_git_identity()
 
-    print("[+] Provisioning complete.")
+    if git_identity is not None:
+        git_user_name, git_user_email = git_identity
+
+        ssh.run_script(
+            ROOT / "scripts" / "provision.sh",
+            environment={
+                "GIT_USER_NAME": git_user_name,
+                "GIT_USER_EMAIL": git_user_email,
+            },
+        )
+    else:
+        ssh.run_script(
+            ROOT / "scripts" / "provision.sh",
+        )
 
 
 # =====================================================================

@@ -63,14 +63,19 @@ sudo docker --version
 echo "[*] Docker Compose version:"
 sudo docker compose version
 
-echo "[+] Provisioning complete."
 
 
+echo "[*] Configure Git author identity from existing Git configuration:"
 # Configure Git author identity from existing Git configuration
-GIT_USER_NAME="$(git config --global user.name 2>/dev/null || true)"
-GIT_USER_EMAIL="$(git config --global user.email 2>/dev/null || true)"
+if [[ -n "${GIT_USER_NAME:-}" && -n "${GIT_USER_EMAIL:-}" ]]; then
+    echo "[*] Configuring Git identity..."
 
-if [[ -n "$GIT_USER_NAME" && -n "$GIT_USER_EMAIL" ]]; then
-    git config --global user.name "$GIT_USER_NAME"
-    git config --global user.email "$GIT_USER_EMAIL"
+    if git config --global user.name "$GIT_USER_NAME" &&
+       git config --global user.email "$GIT_USER_EMAIL"; then
+        echo "[+] Git identity configured."
+    else
+        echo "[!] Failed to configure Git identity. Skipping."
+    fi
 fi
+
+echo "[+] Provisioning complete."

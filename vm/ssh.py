@@ -1,4 +1,6 @@
 from pathlib import Path
+import re
+import shlex
 import subprocess
 import time
 
@@ -69,9 +71,28 @@ class SSHProvisioner:
             check=True,
         )
 
+    # def run_script(
+    #     self,
+    #     script: Path,
+    # ) -> None:
+    #     script = script.resolve()
+
+    #     if not script.is_file():
+    #         raise FileNotFoundError(f"Provisioning script not found: {script}")
+
+    #     print(f"[*] Provisioning with {script}")
+
+    #     with script.open("rb") as f:
+    #         subprocess.run(
+    #             self.command("bash", "-s"),
+    #             stdin=f,
+    #             check=True,
+    #         )
+
     def run_script(
         self,
         script: Path,
+        environment: dict[str, str] | None = None,
     ) -> None:
         script = script.resolve()
 
@@ -80,9 +101,22 @@ class SSHProvisioner:
 
         print(f"[*] Provisioning with {script}")
 
-        with script.open("rb") as f:
-            subprocess.run(
-                self.command("bash", "-s"),
-                stdin=f,
-                check=True,
+        prefix = ""
+
+        if environment:
+            for key in environment:
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                    raise ValueError(f"Invalid environment variable name: {key}")
+
+            prefix = "".join(
+                f"export {key}={shlex.quote(value)}\n"
+                for key, value in environment.items()
             )
+
+        script_data = script.read_bytes()
+
+        subprocess.run(
+            self.command("bash", "-s"),
+            input=prefix.encode() + script_data,
+            check=True,
+        )
