@@ -8,12 +8,14 @@ When you switch computers, you either need to reconnect to the machine where you
 
 This project makes recreating the environment cheap and reproducible.
 
-The VM can be created on demand with a single command:
+The VM can be created on VirtualBox demand with a single command:
 
 ```bash
 uv run python main.py rebuild
 ```
+Open VirtualBox and you will the machine being created in real time automatically.
 
+----------------------------------------------------------------------------------------
 The project automatically handles:
 
 - Creating the Debian VM with VirtualBox
